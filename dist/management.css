@@ -1,0 +1,358 @@
+/* Scoped refinements for management.js. Loaded after the shared design system. */
+.management-page{display:flex;flex-direction:column;gap:22px;min-width:0;width:100%}
+.management-page>*,.management-page .stack>*,.management-page form,.management-page fieldset{min-width:0}
+.management-page>.page-heading{margin-bottom:0}
+.management-page .card-header p{font-size:11px;line-height:1.6;margin:5px 0 0}
+.management-page .card-header h2{font-size:17px;line-height:1.45}
+.management-page .fine-print{font-size:10px;line-height:1.8;color:#93a095;margin:0}
+.management-page .stat-label{padding-right:21px;line-height:1.5}
+.management-page .stat-value{margin-top:14px}
+.management-page .stat-icon{width:19px;height:19px}
+.management-page .badge-gray{background:#f0f3f1;color:#859389}
+.management-page .badge{max-width:100%}
+.management-page .info-box>svg{flex-shrink:0;margin-top:2px}
+.management-page .info-box strong{display:block;margin-bottom:3px}
+.management-page .info-box.compact{padding:12px 14px}
+.management-page .card-body>.divider{margin:4px 0}
+
+/* Review inbox: a scannable report list, not miniature dashboard tiles. */
+.management-page .review-tabs{padding:0 24px 17px;border-bottom:1px solid var(--line);margin:0}
+.management-page .review-list{display:flex;flex-direction:column;gap:0}
+.management-page .review-item{display:grid;grid-template-columns:66px minmax(0,1fr) auto;gap:18px;align-items:center;width:100%;padding:22px 24px;text-align:left;background:#fff;border:0;border-bottom:1px solid #edf1ed;transition:background .16s}
+.management-page .review-item:last-child{border-bottom:0}
+.management-page .review-item:hover{background:#fafcf8}
+.management-page .review-preview{width:66px;height:71px;background:#edf2e9;border:1px solid #e2eadd;border-radius:12px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:8px;color:#8ba27b}
+.management-page .review-preview>span{font-size:6px;letter-spacing:1px;color:#90a180;font-weight:750}
+.management-page .review-item-main{display:block;min-width:0}
+.management-page .review-item-main>.row{margin-bottom:7px;flex-wrap:wrap}
+.management-page .review-item-main>.row>.muted{font-size:10px}
+.management-page .review-item-main>strong{display:block;font-size:13px;line-height:1.55;margin-bottom:5px}
+.management-page .review-item-main>.muted{display:block;font-size:11px;line-height:1.6}
+.management-page .review-meta{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:10px;color:#98a38f;margin-top:8px;line-height:1.5}
+.management-page .review-meta>span{padding:0 2px}
+.management-page .review-item-end{display:flex;flex-direction:column;align-items:flex-end;gap:13px;min-width:0}
+.management-page .review-item-end>.muted{font-size:10px;line-height:1.5}
+.management-page .review-open{display:flex;align-items:center;gap:7px;color:var(--green);font-size:11px;font-weight:750;white-space:nowrap}
+.management-page .empty-state{padding:46px 24px}
+.management-page .empty-state h2{font-size:21px;color:#55744b;margin:0}
+.management-page .empty-state .btn{margin-top:6px}
+
+/* Report inspection. */
+.management-page .inspection-layout{display:grid;grid-template-columns:minmax(0,1.8fr) minmax(260px,1fr);align-items:start;gap:22px}
+.management-page .photo-title{padding:12px 13px;font-size:11px;gap:6px}
+.management-page .photo-title>.muted{font-size:9px}
+.management-page .photo-card .demo-photo{border-radius:0}
+.management-page .photo-card .photo-caption{display:block;margin:0;padding:11px 13px;font-size:10px;line-height:1.65;color:#889580}
+.management-page .photo-grid+.info-box{margin-top:17px}
+.management-page .checklist-summary{font-size:11px;line-height:1.65;align-items:flex-start}
+.management-page .checklist-summary svg{color:#689467;flex-shrink:0}
+.management-page .report-note{margin:0;padding:15px 17px;background:#f6f9f2;border:1px solid #eaf0e3;border-radius:10px;font-size:11px;line-height:1.85;color:#788c6a}
+.management-page .inspection-layout .card-body>.row .muted{font-size:10px;margin-top:4px}
+.management-page .inspection-layout .card-body>.row strong{font-size:12px}
+.management-page .detail-list{margin:0;display:flex;flex-direction:column;gap:16px}
+.management-page .detail-list>div{display:flex;justify-content:space-between;align-items:flex-start;gap:18px}
+.management-page .detail-list dt{font-size:10px;line-height:1.65;color:#98a48e;flex-shrink:0}
+.management-page .detail-list dd{font-size:11px;line-height:1.65;font-weight:650;color:#657b55;text-align:right;margin:0;max-width:66%;overflow-wrap:anywhere}
+.management-page .detail-list .text-green{color:var(--green)}
+.management-page .decision-card{border-color:#dbe7d4;background:#fbfdf9}
+.management-page .decision-card h2{margin:0;font-size:17px}
+.management-page .decision-card p{font-size:11px;line-height:1.8;margin:0}
+.management-page .decision-card .btn{width:100%}
+
+/* Exact demonstration charts. The SVG ring owns its geometry. */
+.management-page .analytics-grid{display:grid;grid-template-columns:minmax(0,1.75fr) minmax(245px,1fr);gap:22px;align-items:stretch}
+.management-page .analytics-grid .card-header{align-items:flex-start;flex-wrap:wrap}
+.management-page .chart-legend{margin:2px 0 0;gap:13px;font-size:9px}
+.management-page .chart-legend i{width:6px;height:6px}
+.management-page .chart-columns{position:relative;display:grid;grid-template-columns:repeat(var(--columns,7),minmax(0,1fr));gap:15px;padding:13px 4px 0;isolation:isolate}
+.management-page .chart-columns:before{content:"";position:absolute;left:0;right:0;top:42px;bottom:27px;background:repeating-linear-gradient(to top,transparent 0,transparent 42px,#eef1e9 42px,#eef1e9 43px);border-bottom:1px solid #e9eee3;z-index:-1}
+.management-page .chart-column{display:flex;flex-direction:column;align-items:center;justify-content:flex-end;gap:8px;min-width:0;height:auto;flex:none}
+.management-page .chart-number{font-size:10px;color:#6d8760;font-weight:750;line-height:1.5}
+.management-page .chart-track{height:176px;width:100%;display:flex;align-items:flex-end}
+.management-page .chart-bar{display:flex;flex-direction:column;width:100%;max-width:37px;min-height:0;margin:0 auto;border-radius:7px 7px 0 0;overflow:hidden;background:none;box-shadow:0 3px 9px #244f3610}
+.management-page .chart-bar-late{background:#eab05b;min-height:2px;width:100%;flex-shrink:0}
+.management-page .chart-bar-timely{background:#39735e;width:100%}
+.management-page .chart-label{font-size:9px;color:#92a083;margin:0;line-height:1.5;white-space:nowrap}
+.management-page .donut-chart{position:relative;display:block;width:180px;height:180px;margin:4px auto 21px;border-radius:0;background:transparent}
+.management-page .donut-chart:before{content:none;display:none}
+.management-page .donut-chart>svg{position:relative;display:block;width:100%;height:100%;overflow:visible}
+.management-page .donut-chart>div{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px}
+.management-page .donut-chart strong{font-size:33px;letter-spacing:-1.2px;line-height:1.2;color:#315d41}
+.management-page .donut-chart span{font-size:10px;color:#9aaa8c}
+.management-page .analytics-grid .card-body>.row{font-size:11px;line-height:1.6}
+.management-page .analytics-grid .card-body>.divider{margin:13px 0}
+.management-page .load-row{display:grid;grid-template-columns:34px minmax(0,1fr);gap:12px;align-items:center}
+.management-page .load-row .row{font-size:10px;gap:8px;margin-bottom:8px}
+.management-page .load-row .row strong{font-size:11px;line-height:1.6}
+.management-page .load-row .row>span{font-size:10px;color:#7f956d;flex-shrink:0}
+.management-page .load-row small{display:block;font-size:9px;margin-top:6px}
+.management-page .analytics-note{padding:0 3px}
+.management-page-analytics>.grid-2 .card-body>.row{font-size:11px;line-height:1.65;gap:12px}
+
+/* Conflict comparison and decisions. */
+.management-page .comparison-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}
+.management-page .comparison-panel{padding:22px;background:#fbfcf8;border:1px solid #e5ecdf;border-radius:13px}
+.management-page .comparison-panel>.row{margin-bottom:16px;gap:10px}
+.management-page .comparison-panel h3{margin:0;font-size:14px}
+.management-page .comparison-icon{display:grid;place-items:center;width:33px;height:33px;background:#edf3e5;border-radius:9px;color:#8aa373}
+.management-page .comparison-panel>.badge{margin-bottom:23px}
+.management-page .comparison-panel .timeline-item{padding-bottom:20px}
+.management-page .comparison-panel .timeline-item:last-child{padding-bottom:0}
+.management-page .comparison-panel .timeline-item strong{font-size:11px;line-height:1.6}
+.management-page .comparison-panel .timeline-item p{font-size:10px;color:#95a185;margin:5px 0 0;line-height:1.85}
+.management-page .decision-options{margin:0 0 20px;padding:0;border:0;display:flex;flex-direction:column;gap:10px}
+.management-page .decision-options legend{margin-bottom:13px;font-size:12px;font-weight:750;color:#61794e}
+.management-page .decision-option{display:flex;align-items:flex-start;gap:12px;padding:16px;border:1px solid #e2e9dc;border-radius:11px;background:#fff;cursor:pointer}
+.management-page .decision-option:has(input:checked){border-color:#b7cfa6;background:#f5f9ef}
+.management-page .decision-option input{margin-top:2px;flex-shrink:0}
+.management-page .decision-option strong{display:block;font-size:11px;line-height:1.7;color:#62784f}
+.management-page .decision-option small{display:block;font-size:10px;line-height:1.7;color:#99a58a;margin-top:4px}
+.management-page-conflicts .card-body>.divider{margin:23px 0}
+.management-page-conflicts .card-body>.page-actions{margin-top:19px;justify-content:flex-end}
+
+/* Company policies and responsive form footers. */
+.management-page-settings .card-body>.row{align-items:flex-start}
+.management-page-settings .card-body>.row strong{font-size:11px}
+.management-page-settings .card-body>.row p{font-size:10px;line-height:1.6;margin:5px 0 0}
+.management-page-settings .switch-row{padding:0;border:0;gap:17px}
+.management-page-settings .switch-row strong{font-size:11px;line-height:1.6}
+.management-page-settings .switch-row small{display:block;font-size:10px;color:#98a48c;line-height:1.7;margin-top:5px}
+.management-page-settings input.switch[type=checkbox]{appearance:none;-webkit-appearance:none;position:relative;display:block;width:38px;height:23px;padding:0;margin:0;border:0;border-radius:20px;background:#dde5d6;cursor:pointer;flex-shrink:0}
+.management-page-settings input.switch[type=checkbox]:after{content:"";position:absolute;width:17px;height:17px;left:3px;top:3px;background:#fff;border-radius:50%;box-shadow:0 1px 3px #173d3518;transition:transform .15s}
+.management-page-settings input.switch[type=checkbox]:checked{background:#39785c}
+.management-page-settings input.switch[type=checkbox]:checked:after{transform:translateX(15px);left:3px}
+.management-page .input-affix{display:flex;align-items:center;border:1px solid #e0e7e0;border-radius:9px;overflow:hidden;background:#fafcf8;min-width:0}
+.management-page .input-affix>span{font-size:11px;color:#a0ac96;padding:0 12px;white-space:nowrap}
+.management-page .input-affix>.input{border:0;border-left:1px solid #e8ede3;border-radius:0;min-width:0;flex:1;width:0}
+.management-page .settings-save{display:flex;justify-content:space-between;align-items:center;gap:20px;padding:20px 24px;margin-top:22px;background:white;border:1px solid var(--line);border-radius:14px}
+.management-page .settings-save .fine-print{max-width:600px}
+.management-page .settings-save .btn{flex-shrink:0}
+
+/* Company calendar. Small screens keep all seven days visible. */
+.management-page .calendar-layout{grid-template-columns:minmax(0,1.45fr) minmax(260px,1fr);align-items:start}
+.management-page .calendar-weekdays,.management-page .company-calendar{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:6px}
+.management-page .calendar-weekdays{margin-bottom:9px}
+.management-page .calendar-weekdays>span{font-size:9px;color:#a2ae94;text-align:center;padding:6px 0}
+.management-page .calendar-cell{min-width:0;min-height:69px;padding:10px 7px;border:1px solid #e8eee1;border-radius:9px;font-size:11px;line-height:1.5;color:#6f8758;background:#fff;overflow:hidden}
+.management-page .calendar-cell>span{display:block;font-weight:650}
+.management-page .calendar-cell small{font-size:7px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.6;color:#8ba478;margin-top:7px}
+.management-page .calendar-cell.weekend{background:#f6f8f2;color:#a6b293}
+.management-page .calendar-cell.today{background:#eff5e4;border-color:#a4bd85}
+.management-page .calendar-cell.today>span{color:#3b7147}
+.management-page .calendar-cell.custom-holiday{background:#fcf3df;border-color:#eddcb2;color:#ab8b47}
+.management-page .calendar-cell.custom-holiday small{color:#ad8e4b}
+.management-page .calendar-cell.dim{background:#fafbf8;border-color:#f2f4ed;color:#c6cdbd}
+.management-page .calendar-legend{display:flex;flex-wrap:wrap;gap:12px;margin-top:20px;font-size:8px;line-height:1.7;color:#99a68c}
+.management-page .calendar-legend>span{display:flex;align-items:center;gap:5px}
+.management-page .calendar-legend i{width:7px;height:7px;border-radius:2px;display:inline-block}
+.management-page .calendar-event{display:flex;align-items:flex-start;gap:15px}
+.management-page .calendar-event>div{min-width:0}
+.management-page .calendar-event strong{font-size:12px;line-height:1.7}
+.management-page .calendar-event p{font-size:10px;line-height:1.65;margin:4px 0 9px}
+.management-page .event-date{width:48px;min-width:48px;min-height:57px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;background:#eef5e6;border:1px solid #e0eacf;border-radius:11px;color:#719451}
+.management-page .event-date strong{font-size:21px;line-height:1.2}
+.management-page .event-date small{font-size:8px;letter-spacing:1px}
+.management-page .event-date.amber{background:#faf2df;border-color:#f0e3bf;color:#ab8b4c}
+.management-page-holidays .stack>.card .card-body>.row{font-size:11px;align-items:flex-start}
+.management-page-holidays .stack>.card .card-body>.row p{margin:4px 0 0;font-size:10px}
+.management-page-holidays .stack>.card .card-body>p{font-size:11px;line-height:1.8;margin:0}
+
+/* Onboarding: a compact functional form with its own visual identity. */
+.management-page .auth-layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.08fr);min-height:650px;max-width:1060px;width:100%;border-radius:23px;overflow:hidden;align-self:center;box-shadow:0 12px 45px #1e442d06}
+.management-page .auth-aside{padding:40px 36px;min-width:0;display:flex;flex-direction:column;justify-content:flex-start;background:#1b463a;color:#fff}
+.management-page .auth-aside>.eyebrow{font-size:8px;letter-spacing:1.65px;line-height:1.7;color:#b6d69c;margin-bottom:35px}
+.management-page .auth-aside h2{font-size:35px;line-height:1.22;font-weight:800;letter-spacing:-1.25px;color:#f5f9ec;margin:0 0 22px}
+.management-page .auth-aside>p{font-size:11px;color:#a7bea2;line-height:1.95;max-width:280px;margin:0}
+.management-page .auth-illustration{width:100%;max-width:350px;min-width:0;margin:15px auto 0}
+.management-page .auth-illustration svg{display:block;width:100%;height:auto}
+.management-page .auth-proof{display:flex;align-items:center;gap:11px;background:#ffffff06;border:1px solid #ffffff12;border-radius:12px;padding:14px;margin-top:auto}
+.management-page .auth-proof .avatar{background:#d9edb4;color:#315e3b;width:34px;height:34px}
+.management-page .auth-proof>div{min-width:0}
+.management-page .auth-proof strong{display:block;color:#e7f1da;font-size:10px;line-height:1.7}
+.management-page .auth-proof>div>span{display:block;font-size:8px;color:#97b28b;margin-top:3px;line-height:1.65}
+.management-page .auth-proof>svg{margin-left:auto;flex-shrink:0;color:#b5d69d}
+.management-page .auth-form{padding:38px 40px;justify-content:center;min-width:0;display:flex;flex-direction:column}
+.management-page .auth-mark{display:flex;align-items:center;gap:10px;margin-bottom:33px;letter-spacing:1.2px;font-size:19px;font-weight:800;color:#284735;width:fit-content}
+.management-page .auth-symbol{display:grid;place-items:center;width:37px;height:37px;background:#deedc5;color:#3d6f43;border-radius:11px;flex-shrink:0}
+.management-page .auth-mark small{display:block;font-size:7px;letter-spacing:.3px;line-height:1.6;font-weight:500;color:#a1af90;margin-top:3px}
+.management-page .auth-navigation {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px;
+  margin-bottom: 24px;
+  border: 1px solid #e0e9df;
+  border-radius: 12px;
+  background: #f2f6f1;
+}
+.management-page .auth-navigation a {
+  display: grid;
+  place-items: center;
+  flex: 1 1 auto;
+  min-height: 44px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  color: #365746;
+  font-size: 13px;
+  font-weight: 700;
+  text-align: center;
+  text-decoration: none;
+}
+.management-page .auth-navigation a[aria-current="page"] {
+  background: #1b463a;
+  color: #fff;
+}
+.management-page .auth-navigation a:not([aria-current]):hover {
+  background: #e3ede2;
+}
+.management-page .auth-form .auth-demo-note {
+  margin: 14px 0 0;
+  color: #506758;
+  font-size: 12px;
+  text-align: center;
+}
+.management-page .auth-form-heading{margin-bottom:21px}
+.management-page .auth-form-heading .eyebrow{font-size:8px;letter-spacing:1.5px;color:#a2b08e;margin-bottom:9px}
+.management-page .auth-form-heading h1{font-size:25px;letter-spacing:-.85px;margin:0 0 10px;line-height:1.25}
+.management-page .auth-form-heading>p.muted{font-size:13px;line-height:1.8;margin:0;max-width:335px}
+.management-page .auth-form form{gap:15px}
+.management-page .auth-form .field-label{font-size:13px;color:#365746}
+.management-page .auth-form .input{font-size:12px;min-height:43px}
+.management-page .auth-form .grid-2{gap:13px}
+.management-page .auth-form .btn{width:100%;min-height:43px}
+.management-page .auth-form form>.btn{margin-top:3px}
+.management-page .auth-separator{display:flex;align-items:center;gap:12px;margin:18px 0;color:#b2bca3;font-size:9px}
+.management-page .auth-separator:before,.management-page .auth-separator:after{content:"";height:1px;background:#edf1e7;flex:1}
+.management-page .auth-form>.info-box{font-size:9px;gap:8px}
+.management-page .auth-form>.info-box p{font-size:9px;line-height:1.7;margin:0;color:#92a184}
+.management-page .auth-form>.info-box>span{display:flex;flex-shrink:0;margin-top:2px}
+.management-page .auth-form>.fine-print{font-size:10px;line-height:1.8;margin-top:15px}
+.management-page .auth-form>.btn-ghost{margin-top:14px}
+.management-page .pin-hero{width:67px;height:67px;background:#f0f6e9;border:1px solid #e4edd8;border-radius:19px;display:grid;place-items:center;color:#89a968;margin:0 0 23px}
+.management-page .auth-form .pin-input{width:100%;height:59px;min-height:59px;max-width:none;text-align:center;font-size:27px;letter-spacing:14px;padding-left:26px;background:#fafcf7;border-color:#dce6d1;border-radius:11px}
+.management-page .auth-form .pin-input::placeholder{color:#c2cfb2;font-size:23px}
+.management-page .auth-form #pin-help{font-size:9px;margin:-5px 0 1px;line-height:1.8}
+
+@container app (max-width:1100px){
+  .management-page .inspection-layout{grid-template-columns:minmax(0,1.5fr) minmax(235px,1fr);gap:18px}
+  .management-page .analytics-grid{grid-template-columns:minmax(0,1.4fr) minmax(230px,1fr);gap:18px}
+  .management-page .review-item{grid-template-columns:57px minmax(0,1fr) auto;gap:14px;padding:19px 20px}
+  .management-page .review-preview{width:57px;height:65px}
+  .management-page .review-item-end>.muted{font-size:9px;max-width:110px;text-align:right}
+  .management-page .calendar-layout{grid-template-columns:minmax(0,1.25fr) minmax(245px,1fr)}
+  .management-page .auth-form{padding:30px}
+  .management-page .auth-aside{padding:35px 29px}
+  .management-page .auth-aside h2{font-size:30px}
+  .management-page .auth-proof>div>span{font-size:7px}
+}
+@container app (max-width:950px){
+  .management-page .inspection-layout{grid-template-columns:1fr}
+  .management-page .inspection-layout>aside{display:grid;grid-template-columns:1fr 1fr;align-items:start;gap:18px}
+  .management-page .calendar-layout{grid-template-columns:1fr}
+  .management-page .calendar-layout>.stack{display:grid;grid-template-columns:1fr 1fr;gap:18px;align-items:start}
+  .management-page .calendar-cell{min-height:75px}
+}
+@container app (max-width:650px){
+  .management-page{gap:19px}
+  .management-page .card-header h2{font-size:16px}
+  .management-page .card-header p{font-size:10px;line-height:1.7}
+  .management-page .fine-print{font-size:9px;line-height:1.8}
+  .management-page .stat-label{font-size:10px;line-height:1.6;padding-right:20px}
+  .management-page .stat-value{font-size:27px;margin-top:12px}
+  .management-page-review>.grid-3{grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+  .management-page-review>.grid-3 .stat-card{padding:13px 10px}
+  .management-page-review>.grid-3 .stat-icon{display:none}
+  .management-page-review>.grid-3 .stat-label{padding-right:0;font-size:8px;min-height:26px;line-height:1.5}
+  .management-page-review>.grid-3 .stat-value{font-size:25px;margin:7px 0}
+  .management-page-review>.grid-3 .stat-foot{font-size:8px;line-height:1.65}
+  .management-page .review-tabs{padding:0 17px 13px;gap:2px}
+  .management-page .review-tabs .tab{padding:8px 9px;font-size:9px;flex-shrink:0}
+  .management-page .review-item{grid-template-columns:45px minmax(0,1fr);gap:11px;padding:18px 16px;align-items:start}
+  .management-page .review-preview{width:45px;height:53px;border-radius:10px;gap:5px;grid-row:span 2;margin-top:2px}
+  .management-page .review-preview>svg{width:23px;height:23px}
+  .management-page .review-preview>span{font-size:5px;letter-spacing:.5px}
+  .management-page .review-item-main>strong{font-size:12px;line-height:1.65}
+  .management-page .review-item-main>.muted{font-size:10px}
+  .management-page .review-item-main>.row{gap:5px;margin-bottom:7px}
+  .management-page .review-item-main .badge{font-size:8px}
+  .management-page .review-meta{gap:4px;font-size:9px;line-height:1.6}
+  .management-page .review-meta svg{width:12px;height:12px}
+  .management-page .review-item-end{grid-column:2;flex-direction:row;align-items:center;justify-content:space-between;gap:7px}
+  .management-page .review-item-end>.muted{font-size:8px;max-width:none;text-align:left}
+  .management-page .review-open{font-size:10px;gap:4px}
+  .management-page .review-open>svg{width:14px;height:14px}
+  .management-page .inspection-layout,.management-page .inspection-layout>aside,.management-page .analytics-grid,.management-page .comparison-grid{grid-template-columns:minmax(0,1fr);gap:16px}
+  .management-page .inspection-layout>aside{display:flex;flex-direction:column}
+  .management-page .inspection-layout>aside>.card{width:100%}
+  .management-page .photo-title{padding:10px 9px;font-size:10px;flex-wrap:wrap;gap:3px}
+  .management-page .photo-title>.muted{font-size:8px}
+  .management-page .photo-card .photo-caption{font-size:9px;padding:10px 9px;line-height:1.7}
+  .management-page .checklist-summary{font-size:11px;gap:9px}
+  .management-page .report-note{padding:12px 13px;font-size:10px}
+  .management-page .detail-list{gap:14px}
+  .management-page .detail-list dt{font-size:10px}
+  .management-page .detail-list dd{font-size:11px}
+  .management-page .decision-card p{font-size:10px}
+  .management-page .chart-columns{gap:8px;padding:10px 0 0}
+  .management-page .chart-track{height:160px}
+  .management-page .chart-bar{max-width:27px;border-radius:6px 6px 0 0}
+  .management-page .chart-number{font-size:9px}
+  .management-page .chart-label{font-size:8px}
+  .management-page .chart-legend{font-size:9px;gap:12px;margin-top:3px}
+  .management-page .donut-chart{width:168px;height:168px;margin:0 auto 22px}
+  .management-page .donut-chart strong{font-size:32px}
+  .management-page .analytics-grid .card-body>.row{font-size:10px}
+  .management-page .load-row{gap:10px}
+  .management-page .load-row .row strong{font-size:10px}
+  .management-page .load-row small{font-size:8px}
+  .management-page-analytics>.grid-2 .card-body>.row{font-size:10px}
+  .management-page .comparison-panel{padding:17px}
+  .management-page .comparison-panel>.row{margin-bottom:14px}
+  .management-page .comparison-panel h3{font-size:13px}
+  .management-page .comparison-panel>.badge{margin-bottom:20px}
+  .management-page .comparison-panel .timeline-item p{font-size:10px}
+  .management-page .decision-option{padding:13px;gap:10px}
+  .management-page .decision-option strong{font-size:10px;line-height:1.8}
+  .management-page .decision-option small{font-size:9px;line-height:1.8}
+  .management-page .decision-options legend{font-size:11px}
+  .management-page-conflicts .card-body>.page-actions .btn{width:100%;flex:1}
+  .management-page .input-affix>span{font-size:10px;padding:0 10px}
+  .management-page .settings-save{padding:17px;flex-direction:column;align-items:stretch;gap:14px;margin-top:17px}
+  .management-page .settings-save .btn{width:100%}
+  .management-page .calendar-layout,.management-page .calendar-layout>.stack{display:grid;grid-template-columns:minmax(0,1fr);gap:16px}
+  .management-page .calendar-weekdays,.management-page .company-calendar{gap:4px}
+  .management-page .calendar-weekdays{margin-bottom:6px}
+  .management-page .calendar-weekdays>span{font-size:8px;padding:4px 0}
+  .management-page .calendar-cell{min-height:46px;padding:7px 2px 4px;font-size:10px;text-align:center;border-radius:7px}
+  .management-page .calendar-cell small{font-size:0;width:4px;height:4px;border-radius:50%;background:currentColor;margin:5px auto 0;padding:0;overflow:hidden}
+  .management-page .calendar-legend{font-size:7px;gap:10px;margin-top:16px}
+  .management-page .calendar-event{gap:12px}
+  .management-page .calendar-event strong{font-size:11px}
+  .management-page .calendar-event p{font-size:9px}
+  .management-page .calendar-event .badge{font-size:8px;white-space:normal;line-height:1.5}
+  .management-page .event-date{width:43px;min-width:43px;min-height:54px}
+  .management-page .event-date strong{font-size:20px}
+  .management-page .auth-layout{display:block;min-height:auto;border-radius:18px}
+  .management-page .auth-aside{display:none}
+  .management-page .auth-form{padding:28px 23px}
+  .management-page .auth-mark{margin-bottom:30px;font-size:19px;gap:10px}
+  .management-page .auth-mark small{font-size:7px}
+  .management-page .auth-symbol{width:35px;height:35px;border-radius:10px}
+  .management-page .auth-form-heading{margin-bottom:22px}
+  .management-page .auth-form-heading h1{font-size:24px;line-height:1.3}
+  .management-page .auth-form-heading>p.muted{font-size:13px;line-height:1.8}
+  .management-page .auth-form .input{font-size:16px;min-height:45px}
+  .management-page .auth-form .grid-2{grid-template-columns:1fr;gap:15px}
+  .management-page .auth-form .btn{min-height:45px;font-size:13px}
+  .management-page .auth-form>.info-box{padding:11px;gap:7px}
+  .management-page .auth-form>.info-box p{font-size:9px;line-height:1.85}
+  .management-page .auth-form .pin-input{font-size:26px;height:59px;min-height:59px;width:100%;letter-spacing:12px;padding-left:24px}
+  .management-page .pin-hero{width:59px;height:59px;border-radius:17px;margin-bottom:20px}
+  .management-page .pin-hero>svg{width:34px;height:34px}
+}
+
+.management-page .auth-form .auth-error {
+  margin: 0;
+  color: #a12c28;
+  font-size: 13px;
+}

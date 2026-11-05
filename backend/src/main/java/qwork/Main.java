@@ -61,7 +61,9 @@ final class Main {
     private static final Pattern PLANNING_TEMPLATE = Pattern.compile("/planning/templates/([0-9]{1,19})");
     private static final Pattern TRIP_ACTION = Pattern.compile("/trips/([0-9]{1,19})/(start|finish|report)");
     private static final Pattern TRIP_TASKS = Pattern.compile("/trips/([0-9]{1,19})/tasks");
+    private static final Pattern TRIP_BUDGET = Pattern.compile("/trips/([0-9]{1,19})/(budget|estimate)");
     private static final Pattern TRIP_REQUEST_DECISION = Pattern.compile("/trip-requests/([0-9]{1,19})/decision");
+    private static final Pattern TRIP_OFFER_ACTION = Pattern.compile("/trip-offers/([0-9]{1,19})/(proposal|confirm)");
 
     private record Attempts(long start, int count) {}
     private record Result(int status, Map<String, Object> body, byte[] image) {
@@ -263,7 +265,7 @@ final class Main {
             case "POST /employees", "POST /objects", "POST /shifts", "POST /notifications/device",
                  "POST /shifts/calendar", "POST /incidents", "POST /planning/templates",
                  "POST /planning/assignment-settings", "POST /field-work/defaults", "POST /trips",
-                 "POST /field-control/work-mode", "POST /trip-requests" -> payload(exchange);
+                 "POST /field-control/work-mode", "POST /trip-offers" -> payload(exchange);
             case "POST /planning/import", "POST /planning/import/preview" -> payload(exchange, MAX_IMPORT_BODY);
             case "POST /sync/events" -> payload(exchange, MAX_PHOTO_BODY);
             default -> {
@@ -278,7 +280,8 @@ final class Main {
                         || ("POST".equals(method) && (REPEAT.matcher(path).matches() || PHOTO_REJECT.matcher(path).matches()
                             || SHIFT_ACTION.matcher(path).matches() || INCIDENT_ACTION.matcher(path).matches()
                             || TASK_TRANSFER.matcher(path).matches() || EMPLOYEE_PASSWORD.matcher(path).matches()
-                            || TRIP_TASKS.matcher(path).matches() || TRIP_REQUEST_DECISION.matcher(path).matches()))) {
+                            || TRIP_TASKS.matcher(path).matches() || TRIP_BUDGET.matcher(path).matches()
+                            || TRIP_REQUEST_DECISION.matcher(path).matches() || TRIP_OFFER_ACTION.matcher(path).matches()))) {
                     yield payload(exchange);
                 }
                 yield Map.<String, Object>of();
@@ -374,7 +377,9 @@ final class Main {
             case "GET /trips": return ok(Trips.list(db, user));
             case "POST /trips": return created(Trips.create(db, user, payload));
             case "GET /trip-requests": return ok(TripRequests.list(db, user));
-            case "POST /trip-requests": return created(TripRequests.create(db, user, payload));
+            case "POST /trip-requests": throw Domain.error(403, "Командировку назначает диспетчер.");
+            case "GET /trip-offers": return ok(TripOffers.list(db, user));
+            case "POST /trip-offers": return created(TripOffers.create(db, user, payload));
             case "GET /field-control": return ok(FieldControl.dashboard(db, user));
             case "POST /field-control/work-mode": return ok(FieldControl.setWorkMode(db, user, payload));
             case "POST /sync/events": return ok(Sync.apply(db, user, payload));
@@ -415,9 +420,19 @@ final class Main {
         if ("POST".equals(method) && tripTasks.matches()) {
             return ok(Trips.attachTasks(db, user, id(tripTasks.group(1)), payload));
         }
+        var tripBudget = TRIP_BUDGET.matcher(path);
+        if ("POST".equals(method) && tripBudget.matches()) {
+            return ok(Trips.updateBudget(db, user, id(tripBudget.group(1)), "estimate".equals(tripBudget.group(2)), payload));
+        }
         var tripRequest = TRIP_REQUEST_DECISION.matcher(path);
         if ("POST".equals(method) && tripRequest.matches()) {
             return ok(TripRequests.decide(db, user, id(tripRequest.group(1)), payload));
+        }
+        var offer = TRIP_OFFER_ACTION.matcher(path);
+        if ("POST".equals(method) && offer.matches()) {
+            long offerId = id(offer.group(1));
+            return ok("proposal".equals(offer.group(2)) ? TripOffers.propose(db, user, offerId, payload)
+                : TripOffers.confirm(db, user, offerId, payload));
         }
         var representative = REPRESENTATIVE.matcher(path);
         if (representative.matches()) {

@@ -63,37 +63,6 @@ final class TripRequests {
         return Map.of("requests", details(db, rows, scope, parameters));
     }
 
-    static Map<String, Object> create(Connection db, Map<String, Object> user, Map<String, Object> body)
-            throws SQLException {
-        if (!Trips.isEmployee(user)) throw error(403, "Запрос на командировку отправляет сотрудник.");
-        long company = number(user, "company_id");
-        long employee = number(user, "id");
-        String destination = field(body, "destination", "Место назначения", 300, false);
-        String purpose = field(body, "purpose", "Цель командировки", 1000, false);
-        String start = Trips.plannedTime(body, "plannedStart", "Начало командировки");
-        String end = Trips.plannedTime(body, "plannedEnd", "Окончание командировки");
-        if (end.compareTo(start) <= 0) throw error(400, "Окончание командировки должно быть позже начала.");
-        var tasks = Trips.taskIds(body.get("taskIds"), true);
-        Trips.lockEmployee(db, company, employee);
-        for (var existing : Db.rows(db, """
-            SELECT id FROM work_trip_requests
-            WHERE company_id = ? AND employee_id = ? AND status = 'pending'
-              AND destination = ? AND purpose = ? AND planned_start = ? AND planned_end = ?
-            """, company, employee, destination, purpose, start, end)) {
-            long id = number(existing, "id");
-            if (taskIds(db, id, company, employee).equals(tasks)) return result(db, company, id);
-        }
-        Trips.validateTasks(db, company, employee, tasks);
-        long id = Db.insert(db, """
-            INSERT INTO work_trip_requests(company_id, employee_id, destination, purpose, planned_start, planned_end, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, company, employee, destination, purpose, start, end, Trips.now());
-        for (long taskId : tasks) {
-            Db.update(db, "INSERT INTO work_trip_request_tasks(request_id, task_id) VALUES (?, ?)", id, taskId);
-        }
-        return result(db, company, id);
-    }
-
     static Map<String, Object> decide(Connection db, Map<String, Object> user, long id, Map<String, Object> body)
             throws SQLException {
         Trips.requireOffice(user);
@@ -117,8 +86,10 @@ final class TripRequests {
                 : (String) row.get("planned_end");
             var taskIds = body.containsKey("taskIds") ? Trips.taskIds(body.get("taskIds"), true)
                 : taskIds(db, id, company, employee);
-            tripId = Trips.schedule(db, company, employee, actor, (String) row.get("destination"), "Запрос сотрудника",
-                (String) row.get("purpose"), start, end, taskIds);
+            var destination = Trips.destination(db, user, body, (String) row.get("destination"));
+            tripId = Trips.schedule(db, company, employee, actor, destination, "Запрос сотрудника",
+                (String) row.get("purpose"), start, end, taskIds, TripBudget.read(body.get("budget")),
+                TripBudget.load(row.get("estimate")));
         }
         Db.update(db, """
             UPDATE work_trip_requests SET status = ?, reason = ?, trip_id = ?, decided_at = ?, decided_by = ?
@@ -187,6 +158,9 @@ final class TripRequests {
         out.put("tripId", Objects.toString(row.get("trip_id"), null));
         out.put("createdAt", row.get("created_at"));
         out.put("decidedAt", row.get("decided_at"));
+        long days = TripBudget.plannedDays(row);
+        out.put("plannedDays", days);
+        out.put("estimate", TripBudget.json(row.get("estimate"), days));
         out.put("taskIds", taskIds);
         out.put("conflicts", conflicts);
         return out;

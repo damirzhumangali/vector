@@ -66,6 +66,11 @@ final class Tasks {
         long assignee = unassigned ? number(user, "id") : findAssignee(db, user, payload);
         String status = unassigned ? "unassigned" : "assigned";
         String deadline = timestamp(payload.get("deadline"), "Срок");
+        String scheduledStart = timestamp(payload.get("scheduledAt"), "Начало выезда");
+        if (scheduledStart != null && deadline != null
+                && !Instant.parse(deadline).isAfter(Instant.parse(scheduledStart))) {
+            throw error(400, "Срок выполнения должен быть позже начала выезда.");
+        }
         long company = number(user, "company_id");
         Long manager = FieldWork.assignedManager(db, company, place.objectId(), unassigned ? 0 : assignee, payload);
         String purpose = field(payload, "purpose", "Цель выезда", 1000, true);
@@ -74,10 +79,11 @@ final class Tasks {
         String pairs = payload.containsKey("photoPairs") ? encode(FieldWork.newPhotoPairs(payload.get("photoPairs"))) : null;
         long id = Db.insert(db, """
             INSERT INTO tasks(company_id, assignee_id, title, object, address, description, location, deadline, object_id,
-                purpose, priority, manager_id, checklist, photo_pairs, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                purpose, priority, manager_id, checklist, photo_pairs, status, scheduled_start)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, company, assignee, title, place.name(), place.address(), description,
-            encode(place.location()), deadline, place.objectId(), purpose, priority, manager, checklist, pairs, status);
+            encode(place.location()), deadline, place.objectId(), purpose, priority, manager, checklist, pairs,
+            status, scheduledStart);
         recordEvent(db, id, user, status, fromImport ? "Импорт из Excel" : "", null);
         return id;
     }
@@ -406,7 +412,8 @@ final class Tasks {
         task.put("objectId", Objects.toString(row.get("object_id"), null));
         task.put("location", decode(row.get("location")));
         task.put("deadline", deadline);
-        task.put("scheduledAt", row.get("scheduled_at"));
+        Object scheduledStart = row.get("scheduled_start");
+        task.put("scheduledAt", scheduledStart == null ? row.get("scheduled_at") : scheduledStart);
         task.put("overdue", overdue(deadline, (String) row.get("status"), events));
         task.put("arrival", decode(row.get("arrival")));
         task.put("repeatOf", Objects.toString(row.get("repeat_of"), null));

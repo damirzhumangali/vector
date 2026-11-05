@@ -31,7 +31,8 @@ final class Db {
         "0005_shifts.sql", "0006_incidents.sql", "0007_planning.sql", "0008_auto_assignment.sql",
         "0009_xlsx_import.sql", "0010_departments.sql", "0011_login_registry.sql", "0012_optional_email.sql",
         "0013_field_reports.sql", "0014_representative_reviews.sql", "0015_field_operations.sql", "0016_trip_requests.sql",
-        "0017_task_assignment_changes.sql", "0018_import_journal.sql", "0019_incident_push.sql"
+        "0017_task_assignment_changes.sql", "0018_import_journal.sql", "0019_incident_push.sql",
+        "0020_trip_budgets.sql", "0021_task_schedule.sql", "0022_trip_offers.sql"
     );
     private static final String SQLITE_SCHEMA = """
         CREATE TABLE IF NOT EXISTS companies (
@@ -163,7 +164,7 @@ final class Db {
                         + Shift.SQLITE_SCHEMA + Incidents.SQLITE_SCHEMA + Planning.SQLITE_SCHEMA
                         + AutoAssignment.SQLITE_SCHEMA + XlsxImport.SQLITE_SCHEMA
                         + RepresentativeReviews.SQLITE_SCHEMA + Trips.SQLITE_SCHEMA + TripRequests.SQLITE_SCHEMA
-                        + IncidentPush.SQLITE_SCHEMA).split(";")) {
+                        + IncidentPush.SQLITE_SCHEMA + TripOffers.SQLITE_SCHEMA).split(";")) {
                     if (!sql.isBlank()) {
                         statement.execute(sql);
                     }
@@ -190,8 +191,15 @@ final class Db {
                 "repeat_of", "INTEGER REFERENCES tasks(id)", "cancel_reason", "TEXT NOT NULL DEFAULT ''",
                 "result", "TEXT NOT NULL DEFAULT ''"
             ));
-            addMissingColumns(db, "tasks", Map.of("object_id", "INTEGER REFERENCES work_sites(id)"));
+            addMissingColumns(db, "tasks", Map.of(
+                "object_id", "INTEGER REFERENCES work_sites(id)", "scheduled_start", "TEXT"
+            ));
             addMissingColumns(db, "task_events", Map.of("position", "TEXT", "received_at", "TEXT"));
+            addMissingColumns(db, "work_trips", Map.of(
+                "object_id", "INTEGER REFERENCES work_sites(id)", "address", "TEXT NOT NULL DEFAULT ''",
+                "budget", "TEXT", "estimate", "TEXT"
+            ));
+            addMissingColumns(db, "work_trip_requests", Map.of("estimate", "TEXT"));
             FieldWork.initSqlite(db);
             Sync.initSqlite(db);
             update(db, """

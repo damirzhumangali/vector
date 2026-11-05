@@ -23,7 +23,7 @@ final class ImportSqlite {
         "work_plans", "planned_jobs", "assignment_settings", "planning_imports", "login_registry", "password_resets",
         "field_work_defaults", "task_representative_reviews", "work_trips", "work_trip_tasks", "employee_work_modes",
         "work_trip_requests", "work_trip_request_tasks", "task_assignment_changes", "planning_import_runs",
-        "push_devices", "incident_push_jobs");
+        "push_devices", "incident_push_jobs", "work_trip_offers");
     private static final List<Table> TABLES = List.of(
         new Table("companies", "id code name", ""),
         new Table("users", "id company_id name login role is_owner password_hash password_salt",
@@ -34,7 +34,7 @@ final class ImportSqlite {
         new Table("work_sites", "id company_id name address latitude longitude radius", ""),
         new Table("tasks", "id company_id assignee_id title object address description status checks photo_before photo_after rework_reason revision",
             "location deadline arrival repeat_of cancel_reason result object_id "
-                + "purpose priority manager_id checklist outcome photo_pairs repeat_reason"),
+                + "purpose priority manager_id checklist outcome photo_pairs repeat_reason scheduled_start"),
         new Table("task_assignment_changes", "task_id previous_revision previous_assignee_id", ""),
         new Table("task_events", "id task_id status actor_id actor_name created_at reason", "position received_at"),
         new Table("task_media",
@@ -45,10 +45,13 @@ final class ImportSqlite {
             "id task_id report_event_id issued_by expires_at method representative_name reason comment created_at",
             "token_hash decision decided_at photo"),
         new Table("work_trips", "id company_id employee_id created_by destination basis purpose planned_start planned_end created_at",
-            "started_at finished_at"),
+            "started_at finished_at object_id address budget estimate"),
+        new Table("work_trip_offers",
+            "id company_id employee_id created_by destination address purpose comment revision created_at",
+            "request_id object_id planned_start planned_end daily_rate proposed_at trip_id confirmed_at confirmed_by"),
         new Table("work_trip_tasks", "trip_id task_id", ""),
         new Table("work_trip_requests", "id company_id employee_id destination purpose planned_start planned_end status reason created_at",
-            "trip_id decided_at decided_by"),
+            "trip_id decided_at decided_by estimate"),
         new Table("work_trip_request_tasks", "request_id task_id", ""),
         new Table("employee_work_modes", "employee_id work_mode", ""),
         new Table("sync_events",

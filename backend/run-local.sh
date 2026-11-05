@@ -29,7 +29,7 @@ if [ -f "$config_file" ]; then
             *) fail "Invalid config entry at line $line_number. Use KEY=value." ;;
         esac
         case "$key" in
-            QWORK_HOST|QWORK_PORT|QWORK_DB|QWORK_DATABASE_URL|QWORK_EMAIL_PROVIDER|QWORK_EMAIL_API_KEY|QWORK_EMAIL_FROM|QWORK_PUBLIC_URL|QWORK_EMAIL_API_URL|QWORK_TRUST_PROXY) ;;
+            QWORK_HOST|QWORK_PORT|QWORK_DB|QWORK_DATABASE_URL|QWORK_EMAIL_PROVIDER|QWORK_EMAIL_API_KEY|QWORK_EMAIL_FROM|QWORK_PUBLIC_URL|QWORK_EMAIL_API_URL|QWORK_TRUST_PROXY|QWORK_EXPO_PUSH_ACCESS_TOKEN) ;;
             *) fail "Unsupported config key at line $line_number." ;;
         esac
         case "$value" in
@@ -81,7 +81,6 @@ esac
 [ -f "$backend_dir/target/qwork-api.jar" ] \
     || fail 'Build the API first: mvn -f backend/pom.xml package'
 command -v java >/dev/null 2>&1 || fail 'Install JDK 21 or newer to run the API.'
-command -v cwebp >/dev/null 2>&1 || fail 'Install cwebp from the webp package and make it available in PATH.'
 
 if [ "${1:-}" = '--check' ]; then
     printf 'API build: present\nMail settings: %s\n' "$mail_state"

@@ -35,6 +35,7 @@ export async function apiRequest(path, { method = 'GET', body, token, timeout = 
     if (!response.ok) {
       const error = new Error(payload?.error || `Сервер ответил с ошибкой (${response.status}).`);
       error.status = response.status;
+      error.code = payload?.code;
       throw error;
     }
     if (!payload) throw new Error('Сервер вернул неожиданный ответ.');

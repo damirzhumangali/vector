@@ -120,6 +120,7 @@ final class Incidents {
         }
         Shift.setAvailable(db, company, actor, false);
         long id = add(db, company, actor, actor, null, "urgent_leave", reason, safe ? 1 : 0, null, eventId, occurred);
+        IncidentPush.enqueue(db, id, company, null);
         var active = Db.rows(db, """
             SELECT id FROM tasks WHERE company_id = ? AND assignee_id = ?
                 AND status IN ('assigned','accepted','travel','arrived','work','rework','paused')
@@ -179,7 +180,9 @@ final class Incidents {
         if (Db.one(db, SELECT + " AND i.task_id = ? AND i.kind = 'emergency' AND i.status = 'open'", company, taskId) != null) {
             throw error(409, "Для заявки уже ожидается ответ сотрудника.");
         }
-        return response(db, user, add(db, company, assignee, actor, taskId, "emergency", reason, null, null, null, Instant.now()));
+        long id = add(db, company, assignee, actor, taskId, "emergency", reason, null, null, null, Instant.now());
+        IncidentPush.enqueue(db, id, company, assignee);
+        return response(db, user, id);
     }
 
     static Map<String, Object> decide(Connection db, Map<String, Object> user, long incidentId,

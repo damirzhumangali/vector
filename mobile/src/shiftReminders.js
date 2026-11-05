@@ -1,5 +1,6 @@
 import { Platform } from 'react-native';
 import * as Notifications from 'expo-notifications';
+import { isIncidentNotification } from './incidentNotifications';
 
 const channel = 'qwork-shifts';
 const prefix = 'qwork-shift-';
@@ -9,8 +10,9 @@ let operations = Promise.resolve();
 let permissionAsked = false;
 
 Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowBanner: true, shouldShowList: true, shouldPlaySound: false, shouldSetBadge: false,
+  handleNotification: async notification => ({
+    shouldShowBanner: true, shouldShowList: true,
+    shouldPlaySound: isIncidentNotification(notification.request.content.data), shouldSetBadge: false,
   }),
 });
 

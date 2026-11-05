@@ -9,6 +9,7 @@ services:
       QWORK_EMAIL_API_KEY: "${QWORK_EMAIL_API_KEY:-}"
       QWORK_EMAIL_FROM: "${QWORK_EMAIL_FROM:-}"
       QWORK_PUBLIC_URL: "${QWORK_PUBLIC_URL:-}"
+      QWORK_EXPO_PUSH_ACCESS_TOKEN: "${QWORK_EXPO_PUSH_ACCESS_TOKEN:-}"
     volumes:
       - qwork_data:/var/lib/qwork
     healthcheck:

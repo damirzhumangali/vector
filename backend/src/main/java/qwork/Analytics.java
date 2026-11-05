@@ -37,12 +37,18 @@ final class Analytics {
             throw error(403, "Аналитика доступна диспетчеру и руководителю.");
         }
         long company = number(user, "company_id");
-        var filters = Filters.read(input);
-        var criteria = new StringBuilder(MATCH);
-        var arguments = new ArrayList<Object>();
-        arguments.add(company);
-        if (filters.employee() != null || !filters.department().isEmpty()) {
-            criteria.append(" AND t.status <> 'unassigned'");
+        String department = authorizedDepartment(user);
+        var filters = Filters.read(input, department);
+        String scope = department.isEmpty() ? MATCH : MATCH
+            + " AND t.status <> 'unassigned' AND u.role = 'employee' AND u.department = ?";
+        Object[] scopeParams = department.isEmpty() ? new Object[]{company} : new Object[]{company, department};
+        var options = options(db, company, department, scope, scopeParams);
+        if (!department.isEmpty()) options.requireAllowed(filters);
+
+        var criteria = new StringBuilder(scope);
+        var arguments = new ArrayList<>(List.of(scopeParams));
+        if (department.isEmpty() && (filters.employee() != null || !filters.department().isEmpty())) {
+            criteria.append(" AND t.status <> 'unassigned' AND u.role = 'employee'");
         }
         if (filters.employee() != null) {
             criteria.append(" AND u.id = ?");
@@ -52,14 +58,14 @@ final class Analytics {
             criteria.append(" AND t.object_id = ?");
             arguments.add(filters.object());
         }
-        if (!filters.department().isEmpty()) {
+        if (department.isEmpty() && !filters.department().isEmpty()) {
             criteria.append(" AND u.department = ?");
             arguments.add(filters.department());
         }
         Object[] params = arguments.toArray();
         var tasks = Db.rows(db, """
             SELECT t.id, t.title, t.status, t.object_id, t.object, t.deadline, t.repeat_of,
-                u.id AS employee_id, u.name AS employee_name, u.department
+                u.id AS employee_id, u.name AS employee_name, u.role AS employee_role, u.department
             """ + criteria + " ORDER BY t.id DESC", params);
         var histories = histories(db, criteria.toString(), params);
         var photos = Db.rows(db, """
@@ -69,9 +75,11 @@ final class Analytics {
         var photoCounts = new HashMap<Long, Long>();
         for (var photo : photos) photoCounts.merge(number(photo, "task_id"), 1L, Long::sum);
 
-        var repeatLinks = Db.rows(db, """
-            SELECT id, repeat_of FROM tasks WHERE company_id = ? AND repeat_of IS NOT NULL ORDER BY id
-            """, company);
+        // A repeat chain can link different departments. Count only links within the permitted scope.
+        var repeatLinks = Db.rows(db, "WITH visible AS (SELECT t.id, t.repeat_of " + scope + ") " + """
+            SELECT child.id, child.repeat_of FROM visible child JOIN visible parent ON parent.id = child.repeat_of
+            ORDER BY child.id
+            """, scopeParams);
         var roots = new HashMap<Long, Long>();
         var repeated = new HashSet<Long>();
         for (var link : repeatLinks) {
@@ -100,7 +108,7 @@ final class Analytics {
             boolean overdue = Boolean.FALSE.equals(slaMet);
             long rejected = photoCounts.getOrDefault(taskId, 0L);
             boolean completed = "done".equals(status);
-            boolean assigned = !"unassigned".equals(status);
+            boolean assigned = !"unassigned".equals(status) && "employee".equals(task.get("employee_role"));
             boolean active = ACTIVE.contains(status);
             aggregate.add(taskId, history, status, overdue, slaMet, rejected, roots, repeated);
             if (assigned) {
@@ -123,7 +131,7 @@ final class Analytics {
             row.put("submittedAt", stamp(history.submitted));
             row.put("overdue", overdue);
             row.put("slaMet", slaMet);
-            row.put("repeatOf", identifier(task, "repeat_of"));
+            row.put("repeatOf", roots.containsKey(taskId) ? identifier(task, "repeat_of") : null);
             row.put("travelMinutes", minutes(history.travelMillis));
             row.put("onSiteMinutes", minutes(history.onSiteMillis));
             row.put("rejectedPhotos", rejected);
@@ -143,9 +151,19 @@ final class Analytics {
             row.put("rejectedAt", photo.get("rejected_at"));
             rejectedPhotos.add(row);
         }
-        return Map.of("filters", filters.json(), "options", options(db, company), "metrics", aggregate.json(),
+        return Map.of("filters", filters.json(), "scope", Map.of("department", department),
+            "options", options.json(), "metrics", aggregate.json(),
             "workload", workloads.values().stream().map(Workload::json).toList(),
             "tasks", detail, "rejectedPhotos", rejectedPhotos);
+    }
+
+    private static String authorizedDepartment(Map<String, Object> user) {
+        if (number(user, "is_owner") != 0) return "";
+        String department = Objects.toString(user.get("department"), "");
+        if (department.isBlank()) {
+            throw error(403, "Владелец компании должен указать ваше подразделение для доступа к аналитике.");
+        }
+        return department;
     }
 
     private static Map<Long, History> histories(Connection db, String criteria, Object[] params) throws SQLException {
@@ -162,18 +180,45 @@ final class Analytics {
         return histories;
     }
 
-    private static Map<String, Object> options(Connection db, long company) throws SQLException {
-        var employees = Db.rows(db, """
-            SELECT id, name, department FROM users
-            WHERE company_id = ? AND role = 'employee' ORDER BY name, id
-            """, company);
-        var objects = Db.rows(db, "SELECT id, name FROM work_sites WHERE company_id = ? ORDER BY name, id", company);
+    private static ReportOptions options(Connection db, long company, String department, String scope,
+                                         Object[] scopeParams) throws SQLException {
+        String peopleSql = "SELECT id, name, department FROM users WHERE company_id = ? AND role = 'employee'";
+        var employees = department.isEmpty()
+            ? Db.rows(db, peopleSql + " ORDER BY name, id", company)
+            : Db.rows(db, peopleSql + " AND department = ? ORDER BY name, id", company, department);
+        String sitesSql = "SELECT id, name FROM work_sites WHERE ";
+        var objects = department.isEmpty()
+            ? Db.rows(db, sitesSql + "company_id = ? ORDER BY name, id", company)
+            : Db.rows(db, sitesSql + "id IN (SELECT t.object_id " + scope
+                + " AND t.company_id = work_sites.company_id) ORDER BY name, id", scopeParams);
         var people = employees.stream().map(row -> Map.of(
             "id", identifier(row, "id"), "name", row.get("name"), "department", row.get("department"))).toList();
         var sites = objects.stream().map(row -> Map.of("id", identifier(row, "id"), "name", row.get("name"))).toList();
-        var departments = employees.stream().map(row -> (String) row.get("department"))
-            .filter(value -> !value.isBlank()).distinct().sorted().toList();
-        return Map.of("employees", people, "objects", sites, "departments", departments);
+        var departments = department.isEmpty()
+            ? employees.stream().map(row -> (String) row.get("department"))
+                .filter(value -> !value.isBlank()).distinct().sorted().toList()
+            : List.of(department);
+        return new ReportOptions(people, sites, departments);
+    }
+
+    private record ReportOptions(List<Map<String, Object>> employees, List<Map<String, Object>> objects,
+                                 List<String> departments) {
+        void requireAllowed(Filters filters) {
+            if (filters.employee() != null && !contains(employees, filters.employee())) {
+                throw error(403, "Сотрудник вне вашего подразделения.");
+            }
+            if (filters.object() != null && !contains(objects, filters.object())) {
+                throw error(403, "Объект недоступен в аналитике вашего подразделения.");
+            }
+        }
+
+        private static boolean contains(List<Map<String, Object>> options, long id) {
+            return options.stream().anyMatch(option -> Long.toString(id).equals(option.get("id")));
+        }
+
+        Map<String, Object> json() {
+            return Map.of("employees", employees, "objects", objects, "departments", departments);
+        }
     }
 
     private static Boolean sla(String status, Instant deadline, Instant submitted, Instant now) {
@@ -216,10 +261,16 @@ final class Analytics {
 
     private record Filters(Long employee, Long object, String department, LocalDate from, LocalDate to,
                            Instant start, Instant end) {
-        static Filters read(Map<String, String> input) {
+        static Filters read(Map<String, String> input, String authorizedDepartment) {
             Long employee = filterId(input.get("employeeId"), "Сотрудник");
             Long object = filterId(input.get("objectId"), "Объект");
             String department = Domain.field(new HashMap<>(input), "department", "Подразделение", 120, true);
+            if (!authorizedDepartment.isEmpty()) {
+                if (!department.isEmpty() && !department.equals(authorizedDepartment)) {
+                    throw error(403, "Отчёт другого подразделения недоступен.");
+                }
+                department = authorizedDepartment;
+            }
             LocalDate from = date(input.get("from"));
             LocalDate to = date(input.get("to"));
             if (from != null && to != null && from.isAfter(to)) {
@@ -299,7 +350,14 @@ final class Analytics {
                 }
                 case "done" -> completed = time;
                 case "rework" -> reworked = true;
-                case "paused", "cancelled", "repeated", "unassigned", "assigned", "accepted" -> {
+                case "reopened" -> {
+                    submitted = null;
+                    completed = null;
+                    reworked = true;
+                    travelStarted = null;
+                    endSite(time);
+                }
+                case "paused", "cancelled", "repeated", "unassigned", "assigned", "accepted", "refused" -> {
                     travelStarted = null;
                     endSite(time);
                 }

@@ -27,7 +27,7 @@ final class FieldControl {
     private static final Set<String> SUBMITTED = Set.of("review", "done");
     private static final Set<String> CLOSED_WITHOUT_REPORT = Set.of("cancelled", "repeated", "refused", "declined");
     private static final Set<String> ENDS_WORK = Set.of("review", "paused", "rework", "cancelled", "repeated",
-        "done", "assigned", "unassigned", "accepted", "travel", "arrived", "refused", "declined");
+        "done", "assigned", "unassigned", "accepted", "travel", "arrived", "refused", "declined", "reopened");
     private static final Duration DELAY_THRESHOLD = Duration.ofMinutes(5);
 
     private FieldControl() {}
@@ -240,6 +240,10 @@ final class FieldControl {
         void add(Event entry) {
             last = entry;
             if ("review".equals(entry.status)) report = entry;
+            if ("reopened".equals(entry.status)) {
+                reworked |= report != null;
+                report = null;
+            }
             if ("arrived".equals(entry.status)) arrivals++;
             if ("rework".equals(entry.status)) reworked = true;
             if ("work".equals(entry.status) && started == null) {

@@ -3,7 +3,9 @@ package qwork;
 import java.sql.Connection;
 import java.time.Instant;
 import java.util.Arrays;
+import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.UUID;
 
 /** Exercises review permissions against a disposable SQLite database; never uses live accounts. */
 public final class DispatcherReviewCheck {
@@ -101,6 +103,18 @@ public final class DispatcherReviewCheck {
         check(Arrays.equals(ORIGINAL, Media.read(db, dispatcher, task, after, true)),
             "Rejected photo original remains available");
         assertEvent(db, task, "rework", dispatcher, "Проверить крепление");
+
+        Db.update(db, "UPDATE tasks SET arrival = ?, location = ? WHERE id = ?",
+            "{\"reason\":\"Previous arrival\"}", "{\"latitude\":0,\"longitude\":0,\"radius\":100}", task);
+        Tasks.updateTask(db, employee, task, Map.of("status", "travel", "expectedRevision", 2));
+        var travel = state(db, task);
+        check("travel".equals(travel.get("status")) && travel.get("arrival") == null,
+            "Rework travel clears the previous arrival");
+        check("Проверить крепление".equals(travel.get("rework_reason")), "Rework instructions stay available");
+        expectFailure(409, () -> Tasks.updateTask(db, employee, task, Map.of("status", "work")));
+        expectFailure(400, () -> Tasks.updateTask(db, employee, task, Map.of("status", "arrived")));
+        Tasks.updateTask(db, employee, task, Map.of("status", "arrived", "arrival", Map.of("reason", "New arrival")));
+        assertEvent(db, task, "arrived", employee, "New arrival");
     }
 
     private static void rejectPhotos(Connection db) throws Exception {
@@ -177,6 +191,66 @@ public final class DispatcherReviewCheck {
         expectFailure(409, () -> Tasks.repeatTask(db, dispatcher, original, Map.of()));
         long managerRepeat = task(db, "done");
         expectFailure(403, () -> Tasks.repeatTask(db, manager, managerRepeat, Map.of()));
+        expectFailure(409, () -> Tasks.updateTask(db, manager, original,
+            Map.of("status", "reopened", "reopenReason", "Duplicate visit")));
+    }
+
+    private static void refuseAndReopen(Connection db) throws Exception {
+        long assignment = task(db, "assigned");
+        var refusal = Map.<String, Object>of("status", "refused", "refusalReason", "Машина в ремонте", "expectedRevision", 1);
+        expectFailure(400, () -> Tasks.updateTask(db, employee, assignment, Map.of("status", "refused")));
+        expectFailure(403, () -> Tasks.updateTask(db, dispatcher, assignment, refusal));
+        expectFailure(404, () -> Tasks.updateTask(db, outsider, assignment, refusal));
+        long emergency = Db.insert(db, """
+            INSERT INTO incidents(company_id, employee_id, reporter_id, task_id, kind, reason, occurred_at, created_at)
+            VALUES (?, ?, ?, ?, 'emergency', 'Urgent', ?, ?)
+            """, company, employee.get("id"), dispatcher.get("id"), assignment, Instant.now().toString(), Instant.now().toString());
+        expectFailure(409, () -> Tasks.updateTask(db, employee, assignment, refusal));
+        Db.update(db, "UPDATE incidents SET status = 'declined' WHERE id = ?", emergency);
+        Instant occurredAt = Instant.now().minusSeconds(45);
+        var offline = Map.<String, Object>of("eventId", UUID.randomUUID().toString(),
+            "taskId", Long.toString(assignment), "kind", "patch", "occurredAt", occurredAt.toString(), "body", refusal);
+        check(Boolean.TRUE.equals(Sync.apply(db, employee, new LinkedHashMap<>(offline)).get("taskRemoved")),
+            "Refusal acknowledges removal without returning task data");
+        var retry = Sync.apply(db, employee, new LinkedHashMap<>(offline));
+        check(Boolean.TRUE.equals(retry.get("taskRemoved")) && Boolean.TRUE.equals(retry.get("duplicate")),
+            "Refusal retry acknowledges the already applied event");
+        check("unassigned".equals(state(db, assignment).get("status")), "Refusal returns work to the assignment queue");
+        assertEvent(db, assignment, "refused", employee, "Машина в ремонте");
+        var event = Db.one(db, "SELECT created_at FROM task_events WHERE task_id = ?", assignment);
+        check(occurredAt.toString().equals(event.get("created_at")), "Offline refusal preserves its occurrence time");
+        check(Domain.number(state(db, assignment), "revision") == 2, "Retry leaves task revision unchanged");
+        expectFailure(404, () -> Tasks.getTask(db, employee, assignment));
+        Incidents.reassign(db, dispatcher, assignment, Domain.number(employee, "id"));
+        check("assigned".equals(state(db, assignment).get("status")), "Dispatcher can assign a refused task again");
+
+        long closed = task(db, "review");
+        photo(db, closed, "before");
+        long after = photo(db, closed, "after");
+        Tasks.updateTask(db, dispatcher, closed, Map.of("status", "done"));
+        var reopen = Map.<String, Object>of("status", "reopened", "reopenReason", "Новая проверка", "expectedRevision", 2);
+        expectFailure(403, () -> Tasks.updateTask(db, employee, closed, reopen));
+        expectFailure(403, () -> Tasks.updateTask(db, dispatcher, closed, reopen));
+        expectFailure(404, () -> Tasks.updateTask(db, outsider, closed, reopen));
+        expectFailure(400, () -> Tasks.updateTask(db, manager, closed, Map.of("status", "reopened", "reopenReason", " ")));
+        Tasks.updateTask(db, manager, closed, reopen);
+        var reopened = state(db, closed);
+        check("rework".equals(reopened.get("status")) && Domain.number(reopened, "revision") == 3,
+            "Manager reopens accepted work in the same task");
+        check("Новая проверка".equals(reopened.get("rework_reason")), "Employee sees the reason for renewed work");
+        check(Media.hasAccepted(db, closed, "before") && !Media.hasAccepted(db, closed, "after"),
+            "Reopening requires a new after photo");
+        check(Arrays.equals(ORIGINAL, Media.read(db, manager, closed, after, true)), "Old evidence stays in history");
+        assertEvent(db, closed, "reopened", manager, "Новая проверка");
+        expectFailure(409, () -> Tasks.updateTask(db, manager, closed, reopen));
+
+        long cancelled = task(db, "assigned");
+        Tasks.updateTask(db, dispatcher, cancelled, Map.of("status", "cancelled", "cancelReason", "Отмена выезда"));
+        var owner = new LinkedHashMap<>(dispatcher);
+        owner.put("is_owner", 1);
+        Tasks.updateTask(db, owner, cancelled, reopen);
+        check("unassigned".equals(state(db, cancelled).get("status")), "Owner reopens cancelled work without assignment");
+        assertEvent(db, cancelled, "reopened", owner, "Новая проверка");
     }
 
     public static void main(String[] args) throws Exception {
@@ -196,9 +270,11 @@ public final class DispatcherReviewCheck {
             rejectPhotos(db);
             permissionsAndStates(db);
             cancelAndRepeat(db);
+            refuseAndReopen(db);
             db.commit();
         }
         System.out.println("PASS dispatcher acceptance, rework, photo rejection, history, tenant isolation, "
-            + "employee restrictions, manager review, revision checks, cancellation and linked repeat");
+            + "employee restrictions, manager review, revision checks, cancellation, linked repeat, refusal, "
+            + "travel for rework and administrative reopening");
     }
 }

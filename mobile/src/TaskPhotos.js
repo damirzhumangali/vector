@@ -119,7 +119,7 @@ async function getPhotoPosition(onLocate) {
   return {};
 }
 
-export function EmployeeCamera({ kind, pairKey, checklistId, onUpload, onLocate, disabled = false }) {
+export function EmployeeCamera({ kind, pairKey, checklistId, onUpload, onLocate, disabled = false, actionLabel }) {
   const camera = useRef(null);
   const actionInProgress = useRef(false);
   const [permission, requestPermission] = useCameraPermissions();
@@ -234,7 +234,9 @@ export function EmployeeCamera({ kind, pairKey, checklistId, onUpload, onLocate,
 
   return (
     <View style={styles.group}>
-      <PhotoButton onPress={open} disabled={disabled} secondary icon="camera" tile>Снять {title.toLowerCase()}</PhotoButton>
+      <PhotoButton onPress={open} disabled={disabled} secondary icon="camera" tile={!actionLabel}>
+        {actionLabel ?? `Снять ${title.toLowerCase()}`}
+      </PhotoButton>
       {!visible && <ErrorMessage message={error} />}
       {!visible && error && permission?.canAskAgain === false && !permission.granted && (
         <PhotoButton secondary onPress={() => Linking.openSettings().catch(() => {})}>Открыть настройки</PhotoButton>
@@ -399,7 +401,7 @@ function GalleryPhoto({ photo, path, imageSource, onReject, rejectDisabled, comp
       <View style={styles.photoHeading}>
         {!comparison && <View style={styles.photoIcon}><Icon name="camera" color="#087CFF" size={18} /></View>}
         <Text style={styles.photoTitle}>{label}</Text>
-        {photo.pending ? <Icon name="clock" color="#F3A227" size={17} /> : rejected ? <Icon name="alert" color="#ED5267" size={17} /> : <Icon name="check" color="#21B885" size={17} />}
+        {rejected || photo.issue ? <Icon name="alert" color="#ED5267" size={17} /> : photo.pending ? <Icon name="clock" color="#F3A227" size={17} /> : <Icon name="check" color="#21B885" size={17} />}
       </View>
       {photo.caption ? <Text style={styles.muted}>{photo.caption}</Text> : null}
       {contextLabel ? <Text style={styles.muted}>{contextLabel}</Text> : null}
@@ -411,7 +413,8 @@ function GalleryPhoto({ photo, path, imageSource, onReject, rejectDisabled, comp
       ) : null}
       {comparison && <PhotoMetadata photo={photo} location={location} />}
       {imageError && <ErrorMessage message="Не удалось открыть снимок." />}
-      {photo.pending && <Text style={styles.muted}>Сохранено на телефоне · ожидает отправки</Text>}
+      {photo.issue ? <Text style={styles.error}>{photo.issue}</Text>
+        : photo.pending && <Text style={styles.muted}>Сохранено на телефоне · ожидает отправки</Text>}
       <PhotoButton
         onPress={() => { setShow(imageError || !show); setImageError(false); }}
         secondary
@@ -486,7 +489,7 @@ export function TaskPhotoGallery({
 
   if (state?.taskId !== taskId) return <ActivityIndicator accessibilityLabel="Загрузка фотографий" />;
   const photos = (state.photos ?? []).filter(photo => !kinds || kinds.includes(photo.kind));
-  const activeProof = photo => ['before', 'after'].includes(photo.kind) && !photo.rejectedAt && !photo.rejectedReason;
+  const activeProof = photo => ['before', 'after'].includes(photo.kind) && !photo.rejectedAt && !photo.rejectedReason && !photo.issue;
   const renderPhoto = (photo, comparison = false) => (
     <GalleryPhoto
       key={String(taskId) + ':' + String(photo.id)}

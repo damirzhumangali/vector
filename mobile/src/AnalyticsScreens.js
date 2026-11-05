@@ -314,7 +314,13 @@ export default function AnalyticsScreens({ request, onOpenTask }) {
           setLoadError('');
         }
       } catch (error) {
-        if (!cancelled) setLoadError(error.message);
+        if (!cancelled) {
+          if (error.status === 401 || error.status === 403) {
+            setReport(null);
+            setLoadedFilters(null);
+          }
+          setLoadError(error.message);
+        }
       } finally {
         running = false;
         if (!cancelled) setLoading(false);
@@ -369,6 +375,7 @@ export default function AnalyticsScreens({ request, onOpenTask }) {
   }
 
   const options = report?.options;
+  const department = report?.scope?.department;
   const visibleReport = loadedFilters === applied ? report : null;
   return (
     <>
@@ -382,7 +389,7 @@ export default function AnalyticsScreens({ request, onOpenTask }) {
       </View>
       <View style={styles.filterToolbar}>
         <View style={styles.flex}><Text style={styles.label}>{periodLabel(applied.from, applied.to)}</Text>
-          <Text style={styles.muted}>Статистика выездных работ</Text></View>
+          <Text style={styles.muted}>{department ? `Подразделение · ${department}` : 'Статистика выездных работ'}</Text></View>
         <Pressable accessibilityRole="button" accessibilityLabel="Открыть фильтры аналитики" onPress={() => setShowFilters(value => !value)} style={styles.filterButton}>
           <Icon name="filter" color="#087CFF" size={20} />
         </Pressable>
@@ -414,9 +421,9 @@ export default function AnalyticsScreens({ request, onOpenTask }) {
         <FilterPicker label="Объект" value={draft.objectId}
           options={(options?.objects ?? []).map(item => ({ value: String(item.id), label: item.name }))}
           onChange={value => change('objectId', value)} disabled={!options || exporting} />
-        <FilterPicker label="Подразделение" value={draft.department}
+        {!department && <FilterPicker label="Подразделение" value={draft.department}
           options={(options?.departments ?? []).map(item => ({ value: item, label: item }))}
-          onChange={value => change('department', value)} disabled={!options || exporting} />
+          onChange={value => change('department', value)} disabled={!options || exporting} />}
         <Button onPress={apply} disabled={loading || invalid || exporting}>{dirty ? 'Применить фильтры' : 'Обновить отчёт'}</Button>
       </View>}
       {loading && <Text accessibilityLiveRegion="polite" style={styles.muted}>Загружаем отчёт…</Text>}

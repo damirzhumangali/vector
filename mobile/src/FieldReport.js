@@ -41,6 +41,8 @@ const EVENT_LABELS = {
   unassigned: 'Возвращена в очередь',
   cancelled: 'Заявка отменена',
   repeated: 'Назначен повторный выезд',
+  refused: 'Сотрудник отказался от заявки',
+  reopened: 'Заявка переоткрыта',
 };
 const REPORT_KINDS = ['before', 'after', 'checklist'];
 
@@ -63,8 +65,9 @@ export default function FieldReport({
   task, request, imageSource, revision, onClose, canReject, onRejected, children,
 }) {
   const events = task.history ?? [];
-  const start = events.find(event => event.status === 'work');
-  const finish = events.filter(event => event.status === 'review').pop();
+  const currentVisit = events.slice(events.map(event => event.status).lastIndexOf('reopened') + 1);
+  const start = currentVisit.find(event => event.status === 'work');
+  const finish = currentVisit.filter(event => event.status === 'review').pop();
   const checklist = task.checklist ?? DEFAULT_CHECKLIST_TITLES.map((title, index) => ({
     id: String(index), title, status: task.checks?.[index] ? 'done' : null,
   }));

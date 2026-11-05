@@ -102,7 +102,7 @@ final class AutoAssignment {
                     ORDER BY e.id DESC LIMIT 1) AS submitted_at
             FROM planned_jobs j JOIN work_sites w ON w.id = j.object_id AND w.company_id = j.company_id
             LEFT JOIN tasks t ON t.id = j.task_id AND t.company_id = j.company_id
-            LEFT JOIN users u ON u.id = t.assignee_id AND u.company_id = j.company_id
+            LEFT JOIN users u ON u.id = t.assignee_id AND u.company_id = j.company_id AND u.role = 'employee'
             WHERE j.company_id = ?
             ORDER BY CASE WHEN j.task_id IS NULL AND j.scheduled_at <= ? THEN 0
                           WHEN j.task_id IS NULL THEN 1 ELSE 2 END, j.scheduled_at, j.id

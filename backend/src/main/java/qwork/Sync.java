@@ -59,9 +59,29 @@ final class Sync {
         CREATE INDEX IF NOT EXISTS sync_events_by_task ON sync_events(task_id, expected_revision);
         CREATE INDEX IF NOT EXISTS sync_conflicts_by_company ON sync_events(company_id, received_at)
             WHERE conflict_reason IS NOT NULL;
+        CREATE TABLE IF NOT EXISTS task_assignment_changes (
+            task_id INTEGER NOT NULL REFERENCES tasks(id),
+            previous_revision INTEGER NOT NULL,
+            previous_assignee_id INTEGER NOT NULL REFERENCES users(id),
+            PRIMARY KEY (task_id, previous_revision)
+        );
+        CREATE INDEX IF NOT EXISTS task_assignment_changes_by_assignee
+            ON task_assignment_changes(task_id, previous_assignee_id);
         """;
 
     private Sync() {}
+
+    static void initSqlite(Connection db) throws SQLException {
+        Db.update(db, """
+            CREATE TRIGGER IF NOT EXISTS qwork_task_assignment_change
+            AFTER UPDATE OF assignee_id ON tasks
+            WHEN OLD.assignee_id <> NEW.assignee_id
+            BEGIN
+                INSERT INTO task_assignment_changes(task_id, previous_revision, previous_assignee_id)
+                VALUES (OLD.id, OLD.revision, OLD.assignee_id);
+            END
+            """);
+    }
 
     static Map<String, Object> apply(Connection db, Map<String, Object> user, Map<String, Object> payload)
             throws Exception {
@@ -76,7 +96,7 @@ final class Sync {
             throw error(400, "Неизвестный вид офлайн-действия.");
         }
         Instant occurredAt = occurrenceTime(field(payload, "occurredAt", "Время действия", 40, false));
-        // Keep only the validated body so Media can release the Base64 string before encoding.
+        // Keep only the validated body so Media can release the Base64 string when reading the photo.
         var body = body(payload.remove("body"));
         long expectedRevision = expectedRevision(body.get("expectedRevision"));
         long companyId = number(user, "company_id");
@@ -89,9 +109,10 @@ final class Sync {
         }
 
         // Authorize before recording an event; authorize again after the mutation lock.
-        getAssignedTask(db, companyId, actorId, taskId);
+        getSyncTask(db, companyId, actorId, taskId);
         Db.lockTask(db, companyId, taskId);
-        var current = getAssignedTask(db, companyId, actorId, taskId);
+        var current = getSyncTask(db, companyId, actorId, taskId);
+        boolean reassigned = number(current, "assignee_id") != actorId;
         int inserted = Db.update(db, """
             INSERT INTO sync_events(company_id, event_id, task_id, actor_id, kind, expected_revision,
                 payload_hash, occurred_at, received_at, requested_status, photo_kind)
@@ -100,7 +121,7 @@ final class Sync {
             """, companyId, eventId, taskId, actorId, kind, expectedRevision, hash, occurredAt.toString(),
                 receivedAt.toString(), requestedStatus, photoKind);
         if (inserted == 0) {
-            return replay(db, user, companyId, actorId, taskId, eventId, hash);
+            return replay(db, user, current, taskId, eventId, hash);
         }
 
         if (occurredAt.isAfter(receivedAt.plus(CLOCK_TOLERANCE)) || occurredAt.isBefore(receivedAt.minus(MAX_AGE))) {
@@ -109,7 +130,9 @@ final class Sync {
         String serverStatus = (String) current.get("status");
         long serverRevision = number(current, "revision");
         String reason = null;
-        if ("cancelled".equals(serverStatus)) {
+        if (reassigned) {
+            reason = "Заявку переназначили другому сотруднику до синхронизации действия.";
+        } else if ("cancelled".equals(serverStatus)) {
             reason = "Заявку отменили до синхронизации действия.";
         } else if ("unassigned".equals(serverStatus)) {
             reason = "Заявку сняли с сотрудника до синхронизации действия.";
@@ -124,7 +147,7 @@ final class Sync {
                 UPDATE sync_events SET conflict_reason = ?, server_status = ?, server_revision = ?
                 WHERE company_id = ? AND event_id = ?
                 """, reason, serverStatus, serverRevision, companyId, eventId);
-            return response(db, user, taskId, conflict(db, companyId, eventId), false);
+            return response(db, user, current, taskId, conflict(db, companyId, eventId), false);
         }
 
         if (kind.equals("patch")) {
@@ -133,7 +156,7 @@ final class Sync {
             return result;
         }
         Media.upload(db, user, taskId, body);
-        return response(db, user, taskId, null, false);
+        return response(db, user, current, taskId, null, false);
     }
 
     static Map<String, Object> conflicts(Connection db, Map<String, Object> user) throws SQLException {
@@ -164,39 +187,60 @@ final class Sync {
         return Map.of("conflict", result);
     }
 
-    private static Map<String, Object> replay(Connection db, Map<String, Object> user, long companyId,
-            long actorId, long taskId, String eventId, String hash) throws Exception {
+    private static Map<String, Object> replay(Connection db, Map<String, Object> user, Map<String, Object> current,
+            long taskId, String eventId, String hash) throws Exception {
+        long companyId = number(user, "company_id");
         var existing = Db.one(db, """
             SELECT task_id, actor_id, payload_hash FROM sync_events WHERE company_id = ? AND event_id = ?
             """, companyId, eventId);
         if (existing == null || number(existing, "task_id") != taskId ||
-            number(existing, "actor_id") != actorId || !hash.equals(existing.get("payload_hash"))) {
+            number(existing, "actor_id") != number(user, "id") || !hash.equals(existing.get("payload_hash"))) {
             throw error(409, "Идентификатор офлайн-действия уже используется.");
         }
-        return response(db, user, taskId, conflict(db, companyId, eventId), true);
+        return response(db, user, current, taskId, conflict(db, companyId, eventId), true);
     }
 
-    private static Map<String, Object> response(Connection db, Map<String, Object> user, long taskId,
+    private static Map<String, Object> response(Connection db, Map<String, Object> user, Map<String, Object> current, long taskId,
             Map<String, Object> conflict, boolean duplicate) throws Exception {
-        var current = getAssignedTask(db, number(user, "company_id"), number(user, "id"), taskId);
-        var result = "unassigned".equals(current.get("status")) ? new LinkedHashMap<String, Object>()
-            : new LinkedHashMap<>(Tasks.taskResponse(db, user, taskId));
+        boolean formerAssignee = number(current, "assignee_id") != number(user, "id");
+        var result = new LinkedHashMap<String, Object>();
+        if (formerAssignee || "unassigned".equals(current.get("status"))) {
+            result.put("taskRemoved", true);
+        } else {
+            result.putAll(Tasks.taskResponse(db, user, taskId));
+        }
         result.put("duplicate", duplicate);
         if (conflict != null) {
-            result.put("conflict", conflict);
+            // A former assignee can acknowledge their action without reading the new task state.
+            result.put("conflict", formerAssignee ? Map.of("eventId", conflict.get("eventId"),
+                "taskId", Long.toString(taskId), "reason", conflict.get("reason")) : conflict);
         }
         return result;
     }
 
-    private static Map<String, Object> getAssignedTask(Connection db, long companyId, long actorId, long taskId)
+    private static Map<String, Object> getSyncTask(Connection db, long companyId, long actorId, long taskId)
             throws SQLException {
         var task = Db.one(db, """
-            SELECT status, revision FROM tasks WHERE id = ? AND company_id = ? AND assignee_id = ?
-            """, taskId, companyId, actorId);
-        if (task == null) {
+            SELECT status, revision, assignee_id FROM tasks WHERE id = ? AND company_id = ?
+            """, taskId, companyId);
+        if (task == null || number(task, "assignee_id") != actorId && !wasAssigned(db, taskId, actorId)) {
             throw error(404, "Заявка не найдена.");
         }
         return task;
+    }
+
+    private static boolean wasAssigned(Connection db, long taskId, long actorId) throws SQLException {
+        // For older tasks, accepted offline actions and employee-authored work events also prove access.
+        return Db.one(db, """
+            SELECT 1 WHERE EXISTS (
+                SELECT 1 FROM task_assignment_changes WHERE task_id = ? AND previous_assignee_id = ?
+            ) OR EXISTS (
+                SELECT 1 FROM sync_events WHERE task_id = ? AND actor_id = ? AND conflict_reason IS NULL
+            ) OR EXISTS (
+                SELECT 1 FROM task_events WHERE task_id = ? AND actor_id = ?
+                    AND status IN ('accepted', 'travel', 'arrived', 'work', 'review', 'paused', 'unassigned')
+            )
+            """, taskId, actorId, taskId, actorId, taskId, actorId) != null;
     }
 
     private static Map<String, Object> conflict(Connection db, long companyId, String eventId) throws SQLException {

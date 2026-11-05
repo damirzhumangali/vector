@@ -195,8 +195,9 @@ function ImportPanel({ objects, request, busy, run, direct, onImportedTasks, onB
   const rows = result?.rows ?? [];
   const validCount = rows.filter(row => !row.error && !row.duplicate).length;
 
-  async function submitWorkbook(base64, previewOnly) {
-    const body = direct ? { base64, mode: 'tasks' } : { base64 };
+  async function submitWorkbook(workbook, previewOnly) {
+    const body = { base64: workbook.base64, fileName: workbook.name };
+    if (direct) body.mode = 'tasks';
     const response = await request(previewOnly ? '/planning/import/preview' : '/planning/import', {
       method: 'POST', body, timeout: 60000,
     });
@@ -214,7 +215,7 @@ function ImportPanel({ objects, request, busy, run, direct, onImportedTasks, onB
         setImported(false);
         setResult(null);
         setFile(next);
-        setResult(await submitWorkbook(next.base64, true));
+        setResult(await submitWorkbook(next, true));
       } catch (failure) {
         setImported(false);
         setFile(null);
@@ -227,7 +228,7 @@ function ImportPanel({ objects, request, busy, run, direct, onImportedTasks, onB
   function commit() {
     if (!file || !validCount || imported) return;
     run(async () => {
-      const response = await submitWorkbook(file.base64, false);
+      const response = await submitWorkbook(file, false);
       if (direct) onImportedTasks?.(response.tasks);
       setResult(response);
       setImported(true);
@@ -241,6 +242,7 @@ function ImportPanel({ objects, request, busy, run, direct, onImportedTasks, onB
       {direct ? (
         <>
           <Text style={styles.muted}>Первая строка листа должна содержать «Название», «Дата», «Время» и одну из колонок «Объект» или «ID объекта». Укажите название объекта из справочника.</Text>
+          <Text style={styles.muted}>Дата и время задают плановое начало. Срок рассчитывается по длительности. Если её не указать, на выполнение будет 120 минут.</Text>
           <Text style={styles.muted}>Можно добавить «Описание», «Приоритет» от 1 до 5, «Длительность, мин» и «Логин исполнителя». Если логин пуст, назначьте сотрудника позже в карточке заявки.</Text>
         </>
       ) : (
@@ -249,7 +251,10 @@ function ImportPanel({ objects, request, busy, run, direct, onImportedTasks, onB
           Можно добавить «Описание», «Приоритет» и «Длительность, мин».
         </Text>
       )}
-      <Text style={styles.muted}>Дата и время принимаются как ячейки Excel или текст в формате ГГГГ-ММ-ДД и ЧЧ:ММ. Файл .xlsx до 2 МБ и 200 строк.</Text>
+      <Text style={styles.muted}>
+        Дата и время принимаются как ячейки Excel или текст. Форматы даты {direct ? 'ДД.ММ.ГГГГ и ГГГГ-ММ-ДД' : 'ГГГГ-ММ-ДД'}, времени ЧЧ:ММ.
+        Файл .xlsx до 2 МБ и 200 строк.
+      </Text>
       <Action secondary onPress={() => setShowObjects(!showObjects)}>{showObjects ? 'Скрыть ID объектов' : 'Показать ID объектов'}</Action>
       {showObjects && (objects.length ? objects.map(object => (
         <Text key={object.id} selectable style={styles.muted}>{object.id} · {object.name}</Text>
@@ -294,6 +299,37 @@ function timeLabel(value) {
   const date = new Date(value);
   if (!Number.isFinite(date.getTime())) return String(value);
   return date.toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+}
+
+function ImportJournal({ imports, busy, onRefresh }) {
+  const [expanded, setExpanded] = useState(null);
+  return (
+    <View style={styles.card}>
+      <Text accessibilityRole="header" style={styles.title}>Журнал импортов</Text>
+      <Text style={styles.muted}>Последние 25 загрузок в вашей компании.</Text>
+      {imports?.length === 0 && <Text style={styles.muted}>Загрузок пока нет.</Text>}
+      {imports?.map(entry => (
+        <View key={entry.id} style={styles.row}>
+          <Text style={styles.label}>{entry.fileName}</Text>
+          <Text style={styles.muted}>
+            {entry.mode === 'tasks' ? 'В заявки' : 'В план'} · {entry.actorName} · {new Date(entry.createdAt).toLocaleString('ru-RU')}
+          </Text>
+          <Text style={styles.muted}>Строк · {entry.total}  Добавлено · {entry.imported}  Дубли · {entry.duplicates}  Ошибки · {entry.invalid}</Text>
+          {entry.errors.length > 0 && (
+            <>
+              <Action secondary onPress={() => setExpanded(current => current === entry.id ? null : entry.id)}>
+                {expanded === entry.id ? 'Скрыть ошибки' : 'Показать ошибки'}
+              </Action>
+              {expanded === entry.id && entry.errors.map(error => (
+                <Text key={error.row} style={styles.error}>Строка {error.row} · {error.message}</Text>
+              ))}
+            </>
+          )}
+        </View>
+      ))}
+      <Action secondary onPress={onRefresh} disabled={busy}>Обновить журнал</Action>
+    </View>
+  );
 }
 
 function AssignmentPanel({ settings, jobs, busy, onSave, onAssign, onRefresh, onOpenTask, taskIds }) {
@@ -347,6 +383,7 @@ export default function PlanningScreens({ request, objects, tasks, onOpenTask, d
   const [jobs, setJobs] = useState([]);
   const [settings, setSettings] = useState(null);
   const [templates, setTemplates] = useState(null);
+  const [imports, setImports] = useState(null);
   const [editor, setEditor] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -388,12 +425,19 @@ export default function PlanningScreens({ request, objects, tasks, onOpenTask, d
     setTemplates(data.templates);
   }
 
+  async function fetchImports() {
+    const data = await request('/planning/imports');
+    setImports(data.imports);
+  }
+
   function refresh() {
-    run(tab === 'jobs' ? fetchAssignment : fetchTemplates);
+    if (tab === 'jobs') run(fetchAssignment);
+    if (tab === 'templates') run(fetchTemplates);
+    if (tab === 'journal') run(fetchImports);
   }
 
   useEffect(() => {
-    if (tab !== 'import') refresh();
+    refresh();
   }, [tab]);
 
   function selectTab(value) {
@@ -441,8 +485,10 @@ export default function PlanningScreens({ request, objects, tasks, onOpenTask, d
 
   return (
     <>
-      {!direct && <Choices value={tab} items={[['jobs', 'Очередь'], ['templates', 'Шаблоны'], ['import', 'Импорт Excel']]}
-        onChange={selectTab} />}
+      <Choices value={tab} items={direct
+        ? [['import', 'Импорт Excel'], ['journal', 'Журнал']]
+        : [['jobs', 'Очередь'], ['templates', 'Шаблоны'], ['import', 'Импорт Excel'], ['journal', 'Журнал']]}
+        onChange={selectTab} />
       {error ? <Text accessibilityRole="alert" style={styles.error}>{error}</Text> : null}
       {message ? <Text accessibilityLiveRegion="polite" style={styles.success}>{message}</Text> : null}
       {busy && <Text accessibilityLiveRegion="polite" style={styles.muted}>Загрузка…</Text>}
@@ -477,6 +523,7 @@ export default function PlanningScreens({ request, objects, tasks, onOpenTask, d
       ))}
       {tab === 'import' && <ImportPanel objects={objects} request={request} busy={busy} run={run}
         direct={direct} onImportedTasks={onImportedTasks} onBackToTasks={onBackToTasks} />}
+      {tab === 'journal' && <ImportJournal imports={imports} busy={busy} onRefresh={refresh} />}
     </>
   );
 }

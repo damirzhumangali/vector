@@ -5,15 +5,21 @@ import java.util.Map;
 final class Domain {
     static final class Failure extends RuntimeException {
         final int status;
+        final String code;
 
-        Failure(int status, String message) {
+        Failure(int status, String message, String code) {
             super(message);
             this.status = status;
+            this.code = code;
         }
     }
 
     static Failure error(int status, String message) {
-        return new Failure(status, message);
+        return error(status, message, null);
+    }
+
+    static Failure error(int status, String message, String code) {
+        return new Failure(status, message, code);
     }
 
     static String field(Map<String, Object> payload, String key, String label, int limit, boolean optional) {

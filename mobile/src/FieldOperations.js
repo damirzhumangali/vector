@@ -9,7 +9,7 @@ const TASK_STATUS = {
   travel: 'В пути', arrived: 'На объекте', work: 'В работе', paused: 'На паузе',
   review: 'Ожидает приёмки', done: 'Принята', rework: 'На доработке',
   repeated: 'Требуется повторный выезд', cancelled: 'Отменена',
-  refused: 'Отказ сотрудника', declined: 'Отказ сотрудника',
+  refused: 'Отказ сотрудника', declined: 'Отказ сотрудника', reopened: 'Переоткрыта',
 };
 const TRIP_STATUS = { planned: 'Запланирована', active: 'В командировке', finished: 'Завершена' };
 const REQUEST_STATUS = { pending: 'На согласовании', approved: 'Согласована', declined: 'Отклонена' };

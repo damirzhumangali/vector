@@ -14,7 +14,9 @@ import { colors as c, Icon } from './src/ui';
 import { EmployeeShiftPanel, EmployeeShiftReminder } from './src/ShiftScreens';
 import { EmployeeTrips } from './src/FieldOperations';
 import { updateShiftReminders } from './src/shiftReminders';
+import { useIncidentNotifications } from './src/incidentNotifications';
 import { WorkScreens } from './src/WorkScreens';
+import { EmployeeCamera } from './src/TaskPhotos';
 import { apiImageSource, apiOrigin, apiRequest } from './src/api';
 import { openOffline } from './src/offline';
 import { openOfflineMedia } from './src/offlineMedia';
@@ -146,7 +148,7 @@ function EmployeeHome({ tasks, onSelect }) {
   );
 }
 
-function Profile({ session, role, onSignOut, onDemoRole, onTasks, onShifts, onQuickAccess, request }) {
+function Profile({ session, role, onSignOut, onDemoRole, onTasks, onShifts, onQuickAccess, request, push }) {
   const name = session?.user.name ?? roles.find(([key]) => key === role)?.[2] ?? 'qwork';
   const initials = name.split(/\s+/).slice(0, 2).map(part => part[0]).join('').toUpperCase();
   return (
@@ -171,6 +173,12 @@ function Profile({ session, role, onSignOut, onDemoRole, onTasks, onShifts, onQu
           <View style={styles.profileIcon}><Icon name="shield" size={20} /></View>
           <View style={styles.taskCopy}><Text style={styles.profileRowLabel}>Быстрый вход</Text><Text style={styles.smallText}>Настроить вход на этом телефоне</Text></View>
           <Icon name="chevron-right" size={18} color={c.muted} />
+        </Pressable>}
+        {session && <Pressable accessibilityRole={push.enable ? 'button' : undefined}
+          onPress={push.enable ?? undefined} disabled={!push.enable} style={styles.profileRow}>
+          <View style={styles.profileIcon}><Icon name="bell" size={20} /></View>
+          <View style={styles.taskCopy}><Text style={styles.profileRowLabel}>Срочные уведомления</Text><Text style={styles.smallText}>{push.status}</Text></View>
+          {push.enable ? <Icon name="chevron-right" size={18} color={c.muted} /> : null}
         </Pressable>}
       </View>
       {session && <EmailSettings user={session.user} request={request} />}
@@ -210,6 +218,7 @@ function Workspace() {
   const offlineMediaRef = useRef(null);
   const refreshRef = useRef(null);
   const sessionRef = useRef(null);
+  const push = useIncidentNotifications(session, sessionRef, navigate);
   const revision = useRef(0);
   const savingTaskRef = useRef(false);
   const [selectedId, setSelectedId] = useState(null);
@@ -538,6 +547,35 @@ function Workspace() {
     return saveServerTask('POST', `/tasks/${encodeURIComponent(taskId)}/photos`, fields, 60000);
   }
 
+  async function replaceQueuedPhoto(issue, fields) {
+    const current = sessionRef.current;
+    const store = offlineRef.current;
+    if (!current || !store) throw new Error('Дождитесь загрузки локального хранилища.');
+    const snapshot = await store.replacePhoto(issue.taskId, issue.eventId, fields);
+    if (sessionRef.current === current && offlineRef.current === store) {
+      setOfflineSnapshot(snapshot);
+      void refreshRef.current?.();
+    }
+  }
+
+  function discardSyncIssue(issue) {
+    const store = offlineRef.current;
+    Alert.alert('Очистить очередь заявки?', 'Действия по этой заявке, которые ещё не принял сервер, будут удалены с телефона.', [
+      { text: 'Назад', style: 'cancel' },
+      { text: 'Удалить', style: 'destructive', onPress: async () => {
+        try {
+          const snapshot = await store?.discardTask(issue.taskId);
+          if (snapshot && offlineRef.current === store) {
+            setOfflineSnapshot(snapshot);
+            void refreshRef.current?.();
+          }
+        } catch (error) {
+          Alert.alert('Не удалось очистить очередь', error.message);
+        }
+      } },
+    ]);
+  }
+
   async function enqueue(id, kind, body, occurredAt) {
     const current = sessionRef.current;
     const store = offlineRef.current;
@@ -632,7 +670,7 @@ function Workspace() {
     if (savingTaskRef.current) return;
     savingTaskRef.current = true;
     setSavingTask(true);
-    const { id, status, checks, checklist, arrival, position, result, outcome, occurredAt } = nextTask;
+    const { id, status, checks, checklist, arrival, position, result, outcome, occurredAt, refusalReason } = nextTask;
     const previous = offlineSnapshot?.tasks?.find(task => task.id === id);
     const statusChanged = status !== previous?.status;
     try {
@@ -643,6 +681,7 @@ function Workspace() {
         ...(statusChanged && status === 'arrived' && arrival ? { arrival } : {}),
         ...(statusChanged && position ? { position } : {}),
         ...(statusChanged && status === 'review' && typeof result === 'string' ? { result } : {}),
+        ...(statusChanged && status === 'refused' ? { refusalReason } : {}),
         ...(outcome && outcome !== previous?.outcome ? { outcome } : {}),
       }, occurredAt);
     } catch (error) {
@@ -673,8 +712,11 @@ function Workspace() {
 
   const isEmployeeSession = session?.user.role === 'employee';
   const showOfflineIcon = offlineMode || Boolean(networkError);
-  const tasks = isEmployeeSession ? offlineSnapshot?.tasks ?? null : session ? serverTasks : demoTasks;
+  const tasks = isEmployeeSession ? offlineSnapshot?.tasks?.filter(task => task.status !== 'refused') ?? null
+    : session ? serverTasks : demoTasks;
   const selected = tasks?.find(task => task.id === selectedId);
+  const syncIssue = isEmployeeSession ? offlineSnapshot?.issues[0] : null;
+  const replaceablePhoto = syncIssue?.replaceable && tasks?.some(task => task.id === syncIssue.taskId);
   const quickAccess = setupSession || (savedQuickAccess && !incomingInvitation);
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
@@ -733,31 +775,21 @@ function Workspace() {
           </View>
           {!session && storageError && <Text accessibilityRole="alert" style={styles.storageWarning}>Локальное сохранение недоступно.</Text>}
           {networkError ? <Text accessibilityRole="alert" style={styles.storageWarning}>{networkError}</Text> : null}
-          {isEmployeeSession && Boolean(offlineSnapshot?.issues.length) && (
+          {syncIssue && (
             <View style={styles.syncBanner}>
               <View style={styles.syncCopy}>
-                <Text accessibilityRole="alert" style={styles.muted}>{offlineSnapshot.issues[0].message}</Text>
+                {syncIssue.taskTitle ? <Text style={styles.taskTitle}>{syncIssue.taskTitle}</Text> : null}
+                <Text accessibilityRole="alert" style={styles.muted}>{syncIssue.message}</Text>
               </View>
-              <Pressable accessibilityRole="button" style={styles.exit} onPress={() => {
-                const issue = offlineSnapshot.issues[0];
-                const store = offlineRef.current;
-                Alert.alert('Удалить действие из локальной очереди?', 'Действия, которые ещё не принял сервер, будут удалены с телефона.', [
-                  { text: 'Назад', style: 'cancel' },
-                  { text: 'Удалить', style: 'destructive', onPress: async () => {
-                    try {
-                      const snapshot = await store?.discardTask(issue.taskId);
-                      if (snapshot && offlineRef.current === store) {
-                        setOfflineSnapshot(snapshot);
-                        void refreshRef.current?.();
-                      }
-                    } catch (error) {
-                      Alert.alert('Не удалось очистить очередь', error.message);
-                    }
-                  } },
-                ]);
-              }}>
-                <Text style={styles.exitText}>Очистить</Text>
-              </Pressable>
+              {replaceablePhoto ? (
+                <EmployeeCamera key={syncIssue.eventId} actionLabel="Заменить фото" kind={syncIssue.photoKind}
+                  pairKey={syncIssue.pairKey} checklistId={syncIssue.checklistId} onLocate={locateArrival}
+                  onUpload={fields => replaceQueuedPhoto(syncIssue, fields)} />
+              ) : (
+                <Pressable accessibilityRole="button" style={styles.exit} onPress={() => discardSyncIssue(syncIssue)}>
+                  <Text style={styles.exitText}>Очистить</Text>
+                </Pressable>
+              )}
             </View>
           )}
           {isEmployeeSession && !showShifts && (
@@ -766,7 +798,7 @@ function Workspace() {
           )}
           <View style={styles.body}>
             {page === 'profile' ? (
-              <Profile session={session} role={role} request={request} onSignOut={signOut} onDemoRole={switchRole}
+              <Profile session={session} role={role} request={request} onSignOut={signOut} onDemoRole={switchRole} push={push}
                 onQuickAccess={() => setSetupSession(session)}
                 onTasks={() => navigate('tasks')} onShifts={() => navigate('shifts')} />
             ) : role === 'employee' && page === 'home' ? (
@@ -795,6 +827,7 @@ function Workspace() {
               selected ? (
                 <WorkScreens key={selected.id} task={selected}
                   busy={savingTask || Boolean(offlineSnapshot?.urgentLeavePending)} setTask={updateTask}
+                  canRefuseTask={isEmployeeSession}
                   onLocate={session ? locateArrival : undefined} onUploadPhoto={session ? uploadPhoto : undefined}
                   request={session ? employeeGallery : request} imageSource={imageSource}
                   galleryRevision={`${selected.revision}|${offlineMode}|${materialsReady}|${offlineSnapshot?.pending}`}

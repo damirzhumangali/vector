@@ -1,5 +1,6 @@
 package qwork;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.math.BigDecimal;
@@ -9,6 +10,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
@@ -41,6 +43,21 @@ final class XlsxImport {
             fingerprint TEXT NOT NULL,
             PRIMARY KEY (company_id, fingerprint)
         );
+        CREATE TABLE IF NOT EXISTS planning_import_runs (
+            id INTEGER PRIMARY KEY,
+            company_id INTEGER NOT NULL REFERENCES companies(id),
+            actor_id INTEGER NOT NULL REFERENCES users(id),
+            actor_name TEXT NOT NULL,
+            file_name TEXT NOT NULL,
+            mode TEXT NOT NULL CHECK (mode IN ('planning', 'tasks')),
+            created_at TEXT NOT NULL,
+            total_rows INTEGER NOT NULL,
+            imported_rows INTEGER NOT NULL,
+            duplicate_rows INTEGER NOT NULL,
+            invalid_rows INTEGER NOT NULL,
+            errors TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS planning_import_runs_by_company ON planning_import_runs(company_id, id DESC);
         """;
     private static final int MAX_EXPANDED_BYTES = 12 * 1024 * 1024;
     private static final int MAX_ROWS = 200;
@@ -69,6 +86,24 @@ final class XlsxImport {
 
     private XlsxImport() {}
 
+    static Map<String, Object> journal(Connection db, Map<String, Object> user) throws SQLException, IOException {
+        Accounts.requireDispatcher(user);
+        var runs = Db.rows(db, """
+            SELECT id, actor_name, file_name, mode, created_at, total_rows, imported_rows, duplicate_rows,
+                invalid_rows, errors
+            FROM planning_import_runs WHERE company_id = ? ORDER BY id DESC LIMIT 25
+            """, Domain.number(user, "company_id"));
+        var imports = new ArrayList<Map<String, Object>>(runs.size());
+        for (var run : runs) {
+            List<Map<String, Object>> errors = Db.JSON.readValue((String) run.get("errors"), new TypeReference<>() {});
+            imports.add(Map.of("id", run.get("id").toString(), "actorName", run.get("actor_name"),
+                "fileName", run.get("file_name"), "mode", run.get("mode"), "createdAt", run.get("created_at"),
+                "total", run.get("total_rows"), "imported", run.get("imported_rows"),
+                "duplicates", run.get("duplicate_rows"), "invalid", run.get("invalid_rows"), "errors", errors));
+        }
+        return Map.of("imports", imports);
+    }
+
     static Map<String, Object> process(Connection db, Map<String, Object> user, Map<String, Object> payload,
                                        boolean apply) throws Exception {
         Accounts.requireDispatcher(user);
@@ -77,6 +112,7 @@ final class XlsxImport {
             throw Domain.error(400, "Выберите режим импорта Excel.");
         }
         boolean direct = "tasks".equals(mode);
+        String name = fileName(payload);
         if (!(payload.get("base64") instanceof String encoded) || encoded.length() > ((MAX_BYTES + 2) / 3) * 4) {
             throw Domain.error(400, "Прикрепите файл Excel .xlsx размером до 2 МБ.");
         }
@@ -172,8 +208,31 @@ final class XlsxImport {
             }
             result.put("duplicate", duplicate);
         }
+        if (apply) recordRun(db, user, name, (String) mode, results, imported);
         return direct ? Map.of("rows", results, "imported", imported, "mode", "tasks", "tasks", tasks)
             : Map.of("rows", results, "imported", imported);
+    }
+
+    private static String fileName(Map<String, Object> payload) {
+        String path = Domain.field(payload, "fileName", "Имя файла", 255, true).replace('\\', '/');
+        String name = path.substring(path.lastIndexOf('/') + 1).strip();
+        if (name.codePoints().anyMatch(Character::isISOControl)) {
+            throw Domain.error(400, "Проверьте имя файла Excel.");
+        }
+        return name.isEmpty() ? "Файл Excel" : name;
+    }
+
+    private static void recordRun(Connection db, Map<String, Object> user, String fileName, String mode,
+                                  List<Map<String, Object>> rows, int imported) throws SQLException, IOException {
+        var errors = rows.stream().filter(row -> row.get("error") != null)
+            .map(row -> Map.of("row", row.get("row"), "message", row.get("error"))).toList();
+        Db.update(db, """
+            INSERT INTO planning_import_runs(company_id, actor_id, actor_name, file_name, mode, created_at,
+                total_rows, imported_rows, duplicate_rows, invalid_rows, errors)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, Domain.number(user, "company_id"), Domain.number(user, "id"), user.get("name"), fileName, mode,
+            Instant.now().toString(), rows.size(), imported, rows.size() - imported - errors.size(), errors.size(),
+            Db.JSON.writeValueAsString(errors));
     }
 
     private static void resolveObject(Connection db, Map<String, Object> user, Map<String, Object> fields,

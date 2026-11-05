@@ -27,6 +27,8 @@ const stageLabels = {
   rework: 'На доработке',
   cancelled: 'Отменена',
   repeated: 'Назначен повторный выезд',
+  refused: 'Сотрудник отказался',
+  reopened: 'Заявка переоткрыта',
 };
 function Action({ children, onPress, disabled = false, secondary = false }) {
   return (
@@ -62,7 +64,7 @@ function formatTime(value) {
 }
 
 export function WorkScreens({ task, setTask, onBack, onOpenTask, onLocate, onUploadPhoto, request, imageSource,
-  galleryRevision = task.revision, busy = false }) {
+  galleryRevision = task.revision, busy = false, canRefuseTask = false }) {
   const [locating, setLocating] = useState(false);
   const [manualArrival, setManualArrival] = useState(false);
   const [arrivalReason, setArrivalReason] = useState('');
@@ -71,6 +73,8 @@ export function WorkScreens({ task, setTask, onBack, onOpenTask, onLocate, onUpl
   const [checklistDraft, setChecklistDraft] = useState(null);
   const [outcomeDraft, setOutcomeDraft] = useState(null);
   const [reportOpen, setReportOpen] = useState(false);
+  const [refusing, setRefusing] = useState(false);
+  const [refusalReason, setRefusalReason] = useState('');
   const status = task.status ?? 'assigned';
   const stageIndex = stages.indexOf(status);
   const due = task.deadline ? formatTime(task.deadline) : task.due;
@@ -135,10 +139,9 @@ export function WorkScreens({ task, setTask, onBack, onOpenTask, onLocate, onUpl
   const actionDisabled = busy || locating || Boolean(actionHint)
     || (status === 'travel' && manualArrival && !arrivalReason.trim());
 
-  const advance = async () => {
+  const advance = async (nextStatus = primaryAction[1]) => {
     setArrivalError('');
     const occurredAt = new Date().toISOString();
-    const nextStatus = primaryAction[1];
     if (status === 'travel' && manualArrival) {
       return update({ status: nextStatus, occurredAt, arrival: { reason: arrivalReason.trim() } });
     }
@@ -178,12 +181,24 @@ export function WorkScreens({ task, setTask, onBack, onOpenTask, onLocate, onUpl
     }
     const changes = { status: nextStatus, position, occurredAt };
     if (status === 'rework') {
-      changes.photos = { ...task.photos, after: 0 };
+      if (nextStatus === 'travel') {
+        changes.arrival = null;
+        setManualArrival(false);
+        setArrivalReason('');
+      } else {
+        changes.photos = { ...task.photos, after: 0 };
+      }
     } else if (nextStatus === 'review') {
       if (checklist) Object.assign(changes, reportValues());
       else changes.result = result.trim();
     }
     return update(changes);
+  };
+
+  const refuse = async () => {
+    if (await update({ status: 'refused', refusalReason: refusalReason.trim(), occurredAt: new Date().toISOString() })) {
+      onBack();
+    }
   };
 
   return (
@@ -260,7 +275,7 @@ export function WorkScreens({ task, setTask, onBack, onOpenTask, onLocate, onUpl
           </View>
         ) : null}
 
-        {status === 'rework' ? (
+        {(status === 'rework' || (['travel', 'arrived', 'work'].includes(status) && task.reworkReason)) ? (
           <View style={styles.card}>
             <SectionHeading icon="alert">Что нужно исправить</SectionHeading>
             <Text style={styles.body}>{task.reworkReason || task.reviewComment || 'Отчёт возвращён на доработку.'}</Text>
@@ -511,12 +526,26 @@ export function WorkScreens({ task, setTask, onBack, onOpenTask, onLocate, onUpl
       {reportOpen && <FieldReport task={task} request={request} imageSource={imageSource}
         revision={galleryRevision} onClose={() => setReportOpen(false)} />}
 
-      {primaryAction ? (
+      {status === 'assigned' && refusing ? (
+        <View style={styles.footer}>
+          <TextInput accessibilityLabel="Причина отказа" placeholder="Укажите причину отказа"
+            placeholderTextColor={palette.muted} editable={!busy} multiline maxLength={1000}
+            style={[styles.input, styles.commentInput]} value={refusalReason} onChangeText={setRefusalReason} />
+          <Action disabled={busy || !refusalReason.trim()} onPress={refuse}>Подтвердить отказ</Action>
+          <Action secondary disabled={busy} onPress={() => setRefusing(false)}>Назад</Action>
+        </View>
+      ) : primaryAction ? (
         <View style={styles.footer}>
           {actionHint ? <Text style={styles.footerHint}>{actionHint}</Text> : null}
-          <Action disabled={actionDisabled} onPress={advance}>
+          <Action disabled={actionDisabled} onPress={() => advance()}>
             {busy ? 'Сохраняем…' : locating ? 'Определяем местоположение…' : primaryAction[0]}
           </Action>
+          {status === 'assigned' && canRefuseTask ? (
+            <Action secondary disabled={busy || locating} onPress={() => setRefusing(true)}>Отказаться от заявки</Action>
+          ) : null}
+          {status === 'rework' ? (
+            <Action secondary disabled={busy || locating} onPress={() => advance('travel')}>Выехать на доработку</Action>
+          ) : null}
         </View>
       ) : null}
     </View>

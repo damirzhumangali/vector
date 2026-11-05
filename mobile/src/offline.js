@@ -32,6 +32,7 @@ function optimisticTasks(state) {
       }
     } else {
       if (status !== undefined) optimistic.status = status;
+      if (task.status === 'rework' && status === 'travel') optimistic.arrival = null;
       if (checks !== undefined) optimistic.checks = checks;
       if (checklist !== undefined) optimistic.checklist = checklist;
       if (arrival !== undefined) optimistic.arrival = arrival;
@@ -56,6 +57,10 @@ function optimisticTasks(state) {
 function isPermanent(error) {
   const { status } = error;
   return status >= 400 && status < 500 && ![401, 408, 425, 429].includes(status);
+}
+
+function isReplaceablePhoto(event) {
+  return event.kind === 'photo' && event.issue && !event.issue.conflict && event.issue.replaceable !== false;
 }
 
 function safeDelete(file) {
@@ -102,11 +107,35 @@ async function loadStore(scope) {
     state = next;
   }
 
+  async function savePhoto(event) {
+    const { body } = event;
+    if (typeof body.imageBase64 !== 'string' || !body.imageBase64.length) {
+      throw new Error('Фотография недоступна.');
+    }
+    // Expo may supply either format, so choose the suffix from the file signature.
+    event.photoExtension = body.imageBase64.startsWith('iVBORw0KGgo') ? 'png' : 'jpg';
+    folder.create({ intermediates: true, idempotent: true });
+    const file = photo(event);
+    try {
+      file.create();
+      await file.write(body.imageBase64, { encoding: 'base64' });
+      delete body.imageBase64;
+      return file;
+    } catch (error) {
+      safeDelete(file);
+      throw error;
+    }
+  }
+
   function snapshot() {
     const issues = state.queue.filter(row => row.issue).map(row => ({
       eventId: row.eventId, taskId: row.taskId, kind: row.kind,
       taskTitle: state.tasks.find(task => task.id === row.taskId)?.title,
       ...row.issue,
+      replaceable: Boolean(isReplaceablePhoto(row)),
+      photoKind: row.kind === 'photo' ? row.body.kind : undefined,
+      pairKey: row.body.pairKey,
+      checklistId: row.body.checklistId,
     }));
     return { tasks: optimisticTasks(state), pending: state.queue.length, issues,
       urgentLeavePending: state.queue.some(row => row.kind === 'urgent_leave' && !row.issue) };
@@ -143,23 +172,34 @@ async function loadStore(scope) {
       const event = { eventId, taskId, occurredAt, kind, body };
       let file;
       try {
-        if (kind === 'photo') {
-          if (typeof body.imageBase64 !== 'string' || !body.imageBase64.length) {
-            throw new Error('Фотография недоступна.');
-          }
-          // Expo may supply JPEG on the simulator, so choose the suffix from the file signature.
-          event.photoExtension = body.imageBase64.startsWith('iVBORw0KGgo') ? 'png' : 'jpg';
-          folder.create({ intermediates: true, idempotent: true });
-          file = photo(event);
-          file.create();
-          await file.write(body.imageBase64, { encoding: 'base64' });
-          delete body.imageBase64;
-        }
+        if (kind === 'photo') file = await savePhoto(event);
         await commit({ ...state, queue: [...state.queue, event] });
       } catch (error) {
         if (file) safeDelete(file);
         throw error;
       }
+      return snapshot();
+    });
+  }
+
+  function replacePhoto(taskId, eventId, input) {
+    return serialized(async () => {
+      const previous = state.queue.find(row => row.taskId === taskId && row.eventId === eventId);
+      if (!previous || !isReplaceablePhoto(previous) || !state.tasks.some(task => task.id === taskId)) {
+        throw new Error('Этот снимок уже недоступен для замены.');
+      }
+      const { imageBase64, capturedAt, latitude, longitude, accuracy } = input;
+      const body = { ...previous.body, imageBase64, capturedAt, latitude, longitude, accuracy };
+      // Retain the queued action's time and revision. The replacement has its own capture time and ID.
+      const event = { taskId, kind: 'photo', eventId: randomUUID(), occurredAt: previous.occurredAt, body };
+      const file = await savePhoto(event);
+      try {
+        await commit({ ...state, queue: state.queue.map(row => row === previous ? event : row) });
+      } catch (error) {
+        safeDelete(file);
+        throw error;
+      }
+      safeDelete(photo(previous));
       return snapshot();
     });
   }
@@ -200,7 +240,8 @@ async function loadStore(scope) {
 
   async function applyResult(event, response, issue) {
     return serialized(async () => {
-      const tasks = replaceTask(state.tasks, response?.task);
+      const tasks = response?.taskRemoved ? state.tasks.filter(task => task.id !== event.taskId)
+        : replaceTask(state.tasks, response?.task);
       const queue = issue
         ? state.queue.map(row => row.eventId === event.eventId ? { ...row, issue } : row)
         : state.queue.filter(row => row.eventId !== event.eventId);
@@ -219,8 +260,11 @@ async function loadStore(scope) {
       if (event.kind === 'photo') {
         try {
           body.imageBase64 = await photo(event).base64();
+          if (!body.imageBase64) throw new Error('Файл фотографии пуст.');
         } catch {
-          const next = await applyResult(event, null, { message: 'Файл фотографии недоступен. Сделайте снимок ещё раз.' });
+          const next = await applyResult(event, null, {
+            message: 'Файл фотографии недоступен. Сделайте снимок ещё раз.', replaceable: true,
+          });
           onChange?.(next);
           continue;
         }
@@ -242,13 +286,16 @@ async function loadStore(scope) {
             conflict,
             message: conflict.message || conflict.reason || 'Действие передано руководителю для проверки.',
           };
-        } else if (leave ? !response.incident : !response.task && !response.duplicate) {
+        } else if (leave ? !response.incident : !response.task && !response.taskRemoved && !response.duplicate) {
           // Retrying the same ID can recover if the response was incomplete.
           throw new Error('Сервер не подтвердил синхронизацию.');
         }
       } catch (error) {
         if (!isPermanent(error)) throw error;
-        issue = { message: error.message || 'Сервер отклонил изменение.' };
+        issue = {
+          message: error.message || 'Сервер отклонил изменение.',
+          replaceable: error.code === 'photo_replaceable' || error.status === 413,
+        };
       }
       const next = await applyResult(event, response, issue);
       onChange?.(next);
@@ -262,7 +309,7 @@ async function loadStore(scope) {
     return flushing;
   }
 
-  return { snapshot, saveTasks, enqueue, enqueueUrgentLeave, pendingPhotos, discardTask, flush };
+  return { snapshot, saveTasks, enqueue, replacePhoto, enqueueUrgentLeave, pendingPhotos, discardTask, flush };
 }
 
 export async function openOffline(session) {

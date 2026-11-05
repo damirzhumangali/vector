@@ -88,7 +88,7 @@ final class Main {
         var server = HttpServer.create(new InetSocketAddress(host, port), 128);
         server.createContext("/", Main::handle);
         var executor = Executors.newVirtualThreadPerTaskExecutor();
-        var scheduler = Executors.newSingleThreadScheduledExecutor();
+        var scheduler = Executors.newScheduledThreadPool(2);
         server.setExecutor(executor);
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             scheduler.shutdownNow();
@@ -97,6 +97,7 @@ final class Main {
         }));
         server.start();
         scheduler.scheduleWithFixedDelay(Main::runPlanning, 5, 30, TimeUnit.SECONDS);
+        scheduler.scheduleWithFixedDelay(IncidentPush::run, 5, 15, TimeUnit.SECONDS);
         System.out.printf("qwork Java API listening on %s:%d%n", host, port);
     }
 
@@ -185,11 +186,11 @@ final class Main {
                     json(exchange, result.status(), result.body());
                 } else {
                     exchange.getResponseHeaders().set("X-Content-Type-Options", "nosniff");
-                    String type = LosslessWebp.isWebp(result.image()) ? "image/webp" : "image/jpeg";
-                    respond(exchange, result.status(), type, result.image());
+                    respond(exchange, result.status(), Media.contentType(result.image()), result.image());
                 }
             } catch (Domain.Failure error) {
-                json(exchange, error.status, Map.of("error", error.getMessage()));
+                json(exchange, error.status, error.code == null ? Map.of("error", error.getMessage())
+                    : Map.of("error", error.getMessage(), "code", error.code));
             } catch (IOException error) {
                 throw error;
             } catch (Exception error) {
@@ -259,7 +260,7 @@ final class Main {
         var payload = switch (method + " " + path) {
             case "PATCH /auth/email" -> payload(exchange);
             case "POST /tasks" -> payload(exchange, MAX_REPORT_BODY);
-            case "POST /employees", "POST /objects", "POST /shifts",
+            case "POST /employees", "POST /objects", "POST /shifts", "POST /notifications/device",
                  "POST /shifts/calendar", "POST /incidents", "POST /planning/templates",
                  "POST /planning/assignment-settings", "POST /field-work/defaults", "POST /trips",
                  "POST /field-control/work-mode", "POST /trip-requests" -> payload(exchange);
@@ -386,11 +387,13 @@ final class Main {
                 return ok(savedDay);
             case "GET /incidents": return ok(Incidents.list(db, user));
             case "POST /incidents": return created(Incidents.create(db, user, payload));
+            case "POST /notifications/device": return ok(IncidentPush.register(db, token, payload));
             case "GET /planning/templates": return ok(Planning.list(db, user));
             case "POST /planning/templates": return created(Planning.save(db, user, null, payload));
             case "POST /planning/generate": return ok(Planning.generate(db, user));
             case "POST /planning/import/preview": return ok(XlsxImport.process(db, user, payload, false));
             case "POST /planning/import": return ok(XlsxImport.process(db, user, payload, true));
+            case "GET /planning/imports": return ok(XlsxImport.journal(db, user));
             case "GET /planning/jobs": return ok(AutoAssignment.list(db, user));
             case "POST /planning/assign": return ok(AutoAssignment.run(db, user));
             case "GET /planning/assignment-settings": return ok(AutoAssignment.settings(db, user, null));

@@ -41,7 +41,7 @@ final class Media {
     private static final int MAX_IMAGE_PIXELS = 16_000_000;
     private static final int MAX_IMAGE_EDGE = 16_383;
     private static final byte[] PNG_SIGNATURE = {(byte) 0x89, 'P', 'N', 'G', 13, 10, 26, 10};
-    private static final String BIT_DEPTH_ERROR = "Для конвертации без потерь нужен снимок с глубиной цвета до 8 бит на канал.";
+    private static final String BIT_DEPTH_ERROR = "Выберите снимок с глубиной цвета до 8 бит на канал.";
     private static final int MAX_PHOTOS = 64;
     private static final int MAX_SUPPLEMENTAL_PHOTOS = 32;
     private static final Semaphore IMAGE_SLOTS = new Semaphore(1);
@@ -69,7 +69,6 @@ final class Media {
 
     private record Position(Double latitude, Double longitude, Double accuracy) {}
     private record DecodedPicture(BufferedImage image, int orientation) {}
-    private record Picture(byte[] original, byte[] display, int width, int height) {}
 
     private Media() {}
 
@@ -180,15 +179,18 @@ final class Media {
             throw error(429, "Сервер обрабатывает другие фотографии. Попробуйте ещё раз.");
         }
         try {
-            var image = readOrientedImage(payload, MAX_IMAGE_BYTES, material);
-            var photo = process(image, material, name, capturedAt, position, true);
+            byte[] original = decode(payload.remove("imageBase64"), MAX_IMAGE_BYTES);
+            var image = readOrientedImage(original, material);
+            int width = image.getWidth();
+            int height = image.getHeight();
+            byte[] display = preview(image, material, name, capturedAt, position);
             long id = Db.insert(db, """
                 INSERT INTO task_media(task_id, author_id, author_name, kind, caption, created_at, captured_at,
                     latitude, longitude, accuracy, sha256, width, height, original_image, display_image, pair_key, checklist_id)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, taskId, number(user, "id"), name, kind, caption, now.toString(), capturedAt,
-                position.latitude(), position.longitude(), position.accuracy(), sha256(photo.original()),
-                photo.width(), photo.height(), photo.original(), photo.display(), pairKey, checklistId);
+                position.latitude(), position.longitude(), position.accuracy(), sha256(original),
+                width, height, original, display, pairKey, checklistId);
             if (!material) {
                 if (proof && FieldWork.MAIN_PAIR.equals(pairKey)) {
                     // Keep the original task response counters compatible with older clients.
@@ -214,6 +216,16 @@ final class Media {
             throw error(404, "Фотография не найдена.");
         }
         return (byte[]) row.get(column);
+    }
+
+    static String contentType(byte[] bytes) {
+        if (isPng(bytes)) return "image/png";
+        // Previously uploaded originals can still be WebP.
+        if (bytes.length >= 12 && bytes[0] == 'R' && bytes[1] == 'I' && bytes[2] == 'F' && bytes[3] == 'F'
+                && bytes[8] == 'W' && bytes[9] == 'E' && bytes[10] == 'B' && bytes[11] == 'P') {
+            return "image/webp";
+        }
+        return "image/jpeg";
     }
 
     static Map<String, Object> reject(Connection db, Map<String, Object> user, long taskId, long photoId,
@@ -313,12 +325,16 @@ final class Media {
         return result;
     }
 
+    private static Domain.Failure replaceablePhotoError(String message) {
+        return error(400, message, "photo_replaceable");
+    }
+
     private static Position position(Map<String, Object> payload) {
         Double lat = measure(payload.get("latitude"), -90, 90);
         Double lon = measure(payload.get("longitude"), -180, 180);
         Double accuracy = measure(payload.get("accuracy"), 0, 100_000);
         if ((lat == null) != (lon == null) || (lat == null && accuracy != null)) {
-            throw error(400, "Укажите обе координаты фотографии.");
+            throw replaceablePhotoError("Укажите обе координаты фотографии.");
         }
         return new Position(lat, lon, accuracy);
     }
@@ -329,7 +345,7 @@ final class Media {
         }
         if (!(value instanceof Number number) || !Double.isFinite(number.doubleValue()) ||
             number.doubleValue() < min || number.doubleValue() > max) {
-            throw error(400, "Некорректная геопозиция фотографии.");
+            throw replaceablePhotoError("Некорректная геопозиция фотографии.");
         }
         return number.doubleValue();
     }
@@ -348,26 +364,25 @@ final class Media {
                 // Report the validation error below.
             }
         }
-        throw error(400, "Некорректное время съёмки.");
+        throw replaceablePhotoError("Некорректное время съёмки.");
     }
 
     private static byte[] decode(Object value, int maxBytes) {
         String limit = maxBytes / (1024 * 1024) + " МБ.";
         if (!(value instanceof String base64) || base64.length() > ((maxBytes + 2) / 3) * 4) {
-            throw error(400, "Прикрепите JPEG или PNG размером до " + limit);
+            throw replaceablePhotoError("Прикрепите JPEG или PNG размером до " + limit);
         }
         byte[] data;
         try {
             data = Base64.getDecoder().decode(base64);
         } catch (IllegalArgumentException e) {
-            throw error(400, "Фотография повреждена.");
+            throw replaceablePhotoError("Фотография повреждена.");
         }
         boolean jpeg = data.length >= 4 && data[0] == (byte) 0xff && data[1] == (byte) 0xd8
             && data[data.length - 2] == (byte) 0xff && data[data.length - 1] == (byte) 0xd9;
-        boolean png = data.length >= 33 && Arrays.equals(data, 0, PNG_SIGNATURE.length,
-            PNG_SIGNATURE, 0, PNG_SIGNATURE.length);
+        boolean png = data.length >= 33 && isPng(data);
         if (data.length > maxBytes || !(jpeg || png)) {
-            throw error(400, "Прикрепите корректный JPEG или PNG размером до " + limit);
+            throw replaceablePhotoError("Прикрепите корректный JPEG или PNG размером до " + limit);
         }
         if (png) {
             validatePng(data);
@@ -375,9 +390,14 @@ final class Media {
         return data;
     }
 
+    private static boolean isPng(byte[] data) {
+        return data.length >= PNG_SIGNATURE.length
+            && Arrays.equals(data, 0, PNG_SIGNATURE.length, PNG_SIGNATURE, 0, PNG_SIGNATURE.length);
+    }
+
     private static void validatePng(byte[] data) {
         if ((data[24] & 0xff) > 8) {
-            throw error(400, BIT_DEPTH_ERROR);
+            throw replaceablePhotoError(BIT_DEPTH_ERROR);
         }
         var chunks = ByteBuffer.wrap(data).position(PNG_SIGNATURE.length);
         while (chunks.remaining() >= 12) {
@@ -387,14 +407,14 @@ final class Media {
                 break;
             }
             if (type == 0x6163544c) { // acTL must precede the first IDAT in an animated PNG.
-                throw error(400, "Прикрепите статичную фотографию. Анимация не поддерживается.");
+                throw replaceablePhotoError("Прикрепите статичную фотографию. Анимация не поддерживается.");
             }
             if (type == 0x49444154) { // IDAT
                 return;
             }
             chunks.position(chunks.position() + length + 4);
         }
-        throw error(400, "Фотография повреждена.");
+        throw replaceablePhotoError("Фотография повреждена.");
     }
 
     static byte[] representativePhoto(Map<String, Object> payload) {
@@ -402,10 +422,10 @@ final class Media {
             throw error(429, "Сервер обрабатывает другие фотографии. Попробуйте ещё раз.");
         }
         try {
-            var image = readOrientedImage(payload, MAX_REPRESENTATIVE_IMAGE_BYTES, true);
-            byte[] display = process(image, true, "", "", null, false).display();
+            var image = readOrientedImage(decode(payload.remove("imageBase64"), MAX_REPRESENTATIVE_IMAGE_BYTES), true);
+            byte[] display = preview(image, true, "", "", null);
             if (display.length > MAX_REPRESENTATIVE_IMAGE_BYTES) {
-                throw error(400, "Фотография слишком большая. Снимите её с меньшим разрешением.");
+                throw replaceablePhotoError("Фотография слишком большая. Снимите её с меньшим разрешением.");
             }
             return display;
         } finally {
@@ -413,23 +433,20 @@ final class Media {
         }
     }
 
-    private static Picture process(BufferedImage image, boolean material, String author, String capturedAt, Position position,
-                                   boolean keepOriginal) {
+    private static byte[] preview(BufferedImage image, boolean material, String author, String capturedAt,
+                                  Position position) {
         try {
             if (!material) validateQuality(image);
-            byte[] display = material ? jpeg(image) : watermarked(image, author, capturedAt, position);
-            byte[] original = keepOriginal ? LosslessWebp.encode(image) : null;
-            return new Picture(original, display, image.getWidth(), image.getHeight());
+            return material ? jpeg(image) : watermarked(image, author, capturedAt, position);
         } catch (IOException e) {
-            throw error(400, "Не удалось обработать фотографию. Снимите её ещё раз.");
+            throw replaceablePhotoError("Не удалось обработать фотографию. Снимите её ещё раз.");
         } finally {
             image.flush();
         }
     }
 
-    private static BufferedImage readOrientedImage(Map<String, Object> payload, int maxBytes, boolean material) {
-        // The request no longer needs the Base64 string after decoding the image.
-        var source = readImage(decode(payload.remove("imageBase64"), maxBytes), material);
+    private static BufferedImage readOrientedImage(byte[] input, boolean material) {
+        var source = readImage(input, material);
         var image = JpegOrientation.normalize(source.image(), source.orientation());
         if (image != source.image()) source.image().flush();
         return image;
@@ -440,7 +457,7 @@ final class Media {
         try (var stream = new MemoryCacheImageInputStream(new ByteArrayInputStream(input))) {
             var readers = ImageIO.getImageReaders(stream);
             if (!readers.hasNext()) {
-                throw error(400, "Фотография повреждена.");
+                throw replaceablePhotoError("Фотография повреждена.");
             }
             var reader = readers.next();
             try {
@@ -449,20 +466,20 @@ final class Media {
                 int height = reader.getHeight(0);
                 if (width <= 0 || height <= 0 || width > MAX_IMAGE_EDGE || height > MAX_IMAGE_EDGE
                         || (long) width * height > MAX_IMAGE_PIXELS) {
-                    throw error(400, "Разрешение фотографии слишком большое.");
+                    throw replaceablePhotoError("Разрешение фотографии слишком большое.");
                 }
                 if (!material && (Math.min(width, height) < 480 || Math.max(width, height) < 640)) {
-                    throw error(400, "Фото слишком маленькое. Снимите его ещё раз.");
+                    throw replaceablePhotoError("Фото слишком маленькое. Снимите его ещё раз.");
                 }
                 decoded = reader.read(0);
             } finally {
                 reader.dispose();
             }
         } catch (IOException e) {
-            throw error(400, "Не удалось обработать фотографию. Снимите её ещё раз.");
+            throw replaceablePhotoError("Не удалось обработать фотографию. Снимите её ещё раз.");
         }
         for (int bits : decoded.getColorModel().getComponentSize()) {
-            if (bits > 8) throw error(400, BIT_DEPTH_ERROR);
+            if (bits > 8) throw replaceablePhotoError(BIT_DEPTH_ERROR);
         }
         return new DecodedPicture(decoded, JpegOrientation.orientation(input));
     }
@@ -482,7 +499,7 @@ final class Media {
             }
         }
         if (lightSum < 35L * size * size) {
-            throw error(400, "Фото слишком тёмное. Добавьте света и снимите ещё раз.");
+            throw replaceablePhotoError("Фото слишком тёмное. Добавьте света и снимите ещё раз.");
         }
         long edgeSum = 0;
         for (int y = 1; y < size - 1; y++) {
@@ -493,7 +510,7 @@ final class Media {
         }
         int samples = (size - 2) * (size - 2);
         if (edgeSum < 20L * samples) {
-            throw error(400, "Фото размыто или на нём мало деталей. Снимите ещё раз.");
+            throw replaceablePhotoError("Фото размыто или на нём мало деталей. Снимите ещё раз.");
         }
     }
 

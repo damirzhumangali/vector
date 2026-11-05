@@ -25,7 +25,7 @@ final class Tasks {
     private static final Set<String> CLOSED = Set.of("done", "cancelled", "repeated");
     private static final Set<String> REPEATABLE = Set.of("done", "cancelled", "review", "rework", "paused");
     private static final String TASK_SELECT = """
-        SELECT t.*, u.name AS assignee_name, m.name AS manager_name, r.id AS repeat_task_id,
+        SELECT t.*, u.name AS assignee_name, u.role AS assignee_role, m.name AS manager_name, r.id AS repeat_task_id,
             r.repeat_reason AS next_repeat_reason, trip_link.trip_id, planned.scheduled_at
         FROM tasks AS t JOIN users AS u ON u.id = t.assignee_id
         LEFT JOIN users AS m ON m.id = t.manager_id AND m.company_id = t.company_id
@@ -155,6 +155,9 @@ final class Tasks {
             Db.update(db, "UPDATE tasks SET manager_id = ?, revision = revision + 1 WHERE id = ?", manager, id);
             return taskResponse(db, user, id);
         }
+        if ("reopened".equals(payload.get("status"))) {
+            return reopen(db, user, id, task, payload);
+        }
         if (!employee && "cancelled".equals(payload.get("status"))) {
             if (CLOSED.contains(oldStatus)) {
                 throw error(409, "Эта заявка уже закрыта.");
@@ -169,10 +172,22 @@ final class Tasks {
         if (employee && !Shift.isAvailable(db, number(user, "company_id"), number(user, "id"))) {
             throw error(409, "Отметьте возвращение, прежде чем продолжить работу.");
         }
-        if (employee && "accepted".equals(payload.get("status")) && Db.one(db, """
-            SELECT id FROM incidents WHERE company_id = ? AND task_id = ? AND kind = 'emergency' AND status = 'open'
-            """, number(user, "company_id"), id) != null) {
+        boolean refusal = "refused".equals(payload.get("status"));
+        if (refusal && !employee) {
+            throw error(403, "Отказ может отправить назначенный сотрудник.");
+        }
+        if (employee && (refusal || "accepted".equals(payload.get("status")))
+            && awaitingEmergency(db, user, id)) {
             throw error(409, "По заявке ожидается ответ на аварийное назначение.");
+        }
+        if (refusal) {
+            if (!"assigned".equals(oldStatus)) {
+                throw error(409, "Отказ доступен до принятия заявки.");
+            }
+            String reason = field(payload, "refusalReason", "Причина отказа", 1000, false);
+            Db.update(db, "UPDATE tasks SET status = 'unassigned', revision = revision + 1 WHERE id = ?", id);
+            recordEvent(db, id, user, "refused", reason, null, occurredAt);
+            return Map.of("taskRemoved", true);
         }
         Changes changes = employee ? employeeChanges(db, id, task, payload) : reviewChanges(db, id, task, payload);
         String status = changes.status();
@@ -188,7 +203,8 @@ final class Tasks {
         if (status.equals("review") && result.isBlank()) {
             throw error(400, "Заполните поле «Выполненные работы».");
         }
-        String arrival = (String) task.get("arrival");
+        boolean reworkTrip = oldStatus.equals("rework") && status.equals("travel");
+        String arrival = reworkTrip ? null : (String) task.get("arrival");
         String eventReason = status.equals("rework") ? changes.reason() : "";
         Map<String, Object> position = null;
         if (employee) {
@@ -216,13 +232,49 @@ final class Tasks {
         return taskResponse(db, user, id);
     }
 
+    private static boolean awaitingEmergency(Connection db, Map<String, Object> user, long id) throws SQLException {
+        return Db.one(db, """
+            SELECT id FROM incidents WHERE company_id = ? AND task_id = ? AND kind = 'emergency' AND status = 'open'
+            """, number(user, "company_id"), id) != null;
+    }
+
+    private static Map<String, Object> reopen(Connection db, Map<String, Object> user, long id,
+                                              Map<String, Object> task, Map<String, Object> payload) throws Exception {
+        boolean owner = "dispatcher".equals(user.get("role"))
+            && user.get("is_owner") instanceof Number value && value.longValue() != 0;
+        if (!"manager".equals(user.get("role")) && !owner) {
+            throw error(403, "Переоткрыть заявку может руководитель или владелец компании.");
+        }
+        String oldStatus = (String) task.get("status");
+        if (!Set.of("done", "cancelled").contains(oldStatus)) {
+            throw error(409, "Можно переоткрыть принятую или отменённую заявку.");
+        }
+        if (task.get("repeat_task_id") != null) {
+            throw error(409, "По этой заявке уже назначен повторный выезд.");
+        }
+        if (awaitingEmergency(db, user, id)) {
+            throw error(409, "Сначала завершите аварийное назначение по этой заявке.");
+        }
+        String reason = field(payload, "reopenReason", "Причина переоткрытия", 1000, false);
+        boolean accepted = oldStatus.equals("done");
+        Media.invalidateAfter(db, id, user);
+        Db.update(db, """
+            UPDATE tasks SET status = ?, rework_reason = ?, cancel_reason = '', arrival = ?, revision = revision + 1
+            WHERE id = ?
+            """, accepted ? "rework" : "unassigned", accepted ? reason : "",
+            accepted ? task.get("arrival") : null, id);
+        recordEvent(db, id, user, "reopened", reason, null);
+        return taskResponse(db, user, id);
+    }
+
     private record Changes(String status, List<Map<String, Object>> checklist, long before, long after, String reason) {}
 
     private static Changes employeeChanges(Connection db, long id, Map<String, Object> task, Map<String, Object> payload) throws Exception {
         String oldStatus = (String) task.get("status");
         Object requested = payload.getOrDefault("status", oldStatus);
         if (!(requested instanceof String status) ||
-            !(status.equals(oldStatus) || status.equals(TRANSITIONS.get(oldStatus)))) {
+            !(status.equals(oldStatus) || status.equals(TRANSITIONS.get(oldStatus))
+                || oldStatus.equals("rework") && status.equals("travel"))) {
             throw error(409, "Этот переход статуса недоступен.");
         }
         if (oldStatus.equals("review") || oldStatus.equals("unassigned") || CLOSED.contains(oldStatus)) {
@@ -344,8 +396,9 @@ final class Tasks {
             return Map.of("key", pair.get("key"), "label", pair.get("label"),
                 "before", active.contains("before"), "after", active.contains("after"));
         }).toList());
-        task.put("assigneeId", "unassigned".equals(status) ? null : row.get("assignee_id").toString());
-        task.put("assigneeName", "unassigned".equals(status) ? null : row.get("assignee_name"));
+        boolean assigned = !"unassigned".equals(status) && "employee".equals(row.get("assignee_role"));
+        task.put("assigneeId", assigned ? row.get("assignee_id").toString() : null);
+        task.put("assigneeName", assigned ? row.get("assignee_name") : null);
         task.put("tripId", Objects.toString(row.get("trip_id"), null));
         task.put("managerId", Objects.toString(row.get("manager_id"), null));
         task.put("managerName", row.get("manager_name"));

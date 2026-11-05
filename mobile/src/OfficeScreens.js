@@ -39,6 +39,8 @@ const statusLabels = {
   paused: 'Приостановлена',
   cancelled: 'Отменена',
   repeated: 'Назначен повторный выезд',
+  refused: 'Сотрудник отказался',
+  reopened: 'Заявка переоткрыта',
 };
 
 const repeatableStatuses = ['review', 'done', 'rework', 'paused', 'cancelled'];
@@ -726,14 +728,15 @@ function TaskDetails({ task }) {
   );
 }
 
-function TaskActions({ task, onCancelTask, onRepeatTask, busy, error }) {
+function TaskActions({ task, onCancelTask, onRepeatTask, onReopenTask, busy, error }) {
   const [action, setAction] = useState(null);
   const [reason, setReason] = useState('');
   const [deadlineValue, setDeadlineValue] = useState(null);
   const [validation, setValidation] = useState('');
   const canCancel = !closedStatuses.includes(task.status);
-  const canRepeat = Boolean(onRepeatTask) && repeatableStatuses.includes(task.status);
-  if (!canCancel && !canRepeat) return null;
+  const canRepeat = Boolean(onRepeatTask && task.assigneeId) && repeatableStatuses.includes(task.status);
+  const canReopen = Boolean(onReopenTask) && ['done', 'cancelled'].includes(task.status) && !task.repeatTaskId;
+  if (!canCancel && !canRepeat && !canReopen) return null;
 
   return (
     <View style={styles.card}>
@@ -757,6 +760,21 @@ function TaskActions({ task, onCancelTask, onRepeatTask, busy, error }) {
             onCancelTask(task.id, reason.trim());
           }}>Подтвердить отмену</Button>
           <Button disabled={busy} onPress={() => setAction(null)} secondary>Назад</Button>
+        </>
+      ) : action === 'reopen' && canReopen ? (
+        <>
+          <Text style={styles.muted}>
+            {task.status === 'done' ? 'Отчёт вернётся сотруднику на доработку.' : 'Заявка вернётся в список без исполнителя.'}
+          </Text>
+          <Text style={styles.label}>Причина переоткрытия</Text>
+          <TextInput accessibilityLabel="Причина переоткрытия" editable={!busy} multiline
+            style={[styles.input, styles.multiline]} value={reason} onChangeText={setReason}
+            placeholder="Объясните, почему заявку нужно открыть снова" placeholderTextColor="#64718A" maxLength={1000} />
+          <Button disabled={busy || !reason.trim()} onPress={async () => {
+            Keyboard.dismiss();
+            if (await onReopenTask(task.id, reason.trim())) setAction(null);
+          }}>Подтвердить переоткрытие</Button>
+          <Button onPress={() => setAction(null)} disabled={busy} secondary>Назад</Button>
         </>
       ) : action === 'repeat' && canRepeat ? (
         <>
@@ -786,6 +804,7 @@ function TaskActions({ task, onCancelTask, onRepeatTask, busy, error }) {
         <>
           {canCancel && <Button disabled={busy} onPress={() => { setReason(''); setAction('cancel'); }} secondary>Отменить заявку</Button>}
           {canRepeat && <Button disabled={busy} onPress={() => { setReason(''); setAction('repeat'); }} secondary>Повторный выезд</Button>}
+          {canReopen && <Button disabled={busy} onPress={() => { setReason(''); setAction('reopen'); }} secondary>Переоткрыть заявку</Button>}
         </>
       )}
     </View>
@@ -1097,6 +1116,7 @@ export default function OfficeScreens({
   const [passwordEmployeeId, setPasswordEmployeeId] = useState(null);
   const manager = role === 'manager';
   const canReview = manager || role === 'dispatcher';
+  const canReopen = manager || (role === 'dispatcher' && session?.user.isOwner);
   const operations = creating === 'operations';
   const planning = creating === 'planning';
   const importing = creating === 'import-tasks';
@@ -1109,6 +1129,7 @@ export default function OfficeScreens({
   const original = selected?.repeatOf && tasks.find((task) => task.id === selected.repeatOf);
   const pending = tasks.filter((task) => task.status === 'review');
   const accepted = tasks.filter((task) => task.status === 'done');
+  const cancelled = tasks.filter((task) => task.status === 'cancelled');
   const needsRework = tasks.filter((task) => task.status === 'rework');
   const visibleTasks = tasks.filter(task => {
     const matchesText = `${task.title} ${task.object} ${task.assigneeName || ''} ${task.id}`.toLocaleLowerCase('ru-RU').includes(search.trim().toLocaleLowerCase('ru-RU'));
@@ -1257,6 +1278,15 @@ export default function OfficeScreens({
     });
   }
 
+  async function reopenTask(id, reopenReason) {
+    let saved = false;
+    await submit(async () => {
+      await onUpdateTask(id, { status: 'reopened', reopenReason });
+      saved = true;
+    });
+    return saved;
+  }
+
   function repeatTask(id, fields) {
     return submit(async () => {
       const result = await onRepeatTask(id, fields);
@@ -1361,6 +1391,7 @@ export default function OfficeScreens({
                 task={selected}
                 onCancelTask={cancelTask}
                 onRepeatTask={!manager && !repeat ? repeatTask : null}
+                onReopenTask={canReopen && onUpdateTask ? reopenTask : null}
                 busy={busy}
                 error={error}
               />
@@ -1422,6 +1453,14 @@ export default function OfficeScreens({
               <>
                 <Text accessibilityRole="header" style={styles.sectionTitle}>Принятые · {accepted.length}</Text>
                 {accepted.map((task) => (
+                  <TaskCard key={task.id} task={task} onPress={() => openTask(task.id)} />
+                ))}
+              </>
+            )}
+            {cancelled.length > 0 && (
+              <>
+                <Text accessibilityRole="header" style={styles.sectionTitle}>Отменённые · {cancelled.length}</Text>
+                {cancelled.map((task) => (
                   <TaskCard key={task.id} task={task} onPress={() => openTask(task.id)} />
                 ))}
               </>

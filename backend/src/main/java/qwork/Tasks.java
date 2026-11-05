@@ -26,10 +26,12 @@ final class Tasks {
     private static final Set<String> REPEATABLE = Set.of("done", "cancelled", "review", "rework", "paused");
     private static final String TASK_SELECT = """
         SELECT t.*, u.name AS assignee_name, m.name AS manager_name, r.id AS repeat_task_id,
-            r.repeat_reason AS next_repeat_reason
+            r.repeat_reason AS next_repeat_reason, trip_link.trip_id, planned.scheduled_at
         FROM tasks AS t JOIN users AS u ON u.id = t.assignee_id
         LEFT JOIN users AS m ON m.id = t.manager_id AND m.company_id = t.company_id
         LEFT JOIN tasks AS r ON r.repeat_of = t.id AND r.company_id = t.company_id
+        LEFT JOIN work_trip_tasks AS trip_link ON trip_link.task_id = t.id
+        LEFT JOIN planned_jobs AS planned ON planned.task_id = t.id AND planned.company_id = t.company_id
         """;
 
     private Tasks() {}
@@ -50,26 +52,34 @@ final class Tasks {
 
     static Map<String, Object> createTask(Connection db, Map<String, Object> user,
                                           Map<String, Object> payload) throws Exception {
+        return taskResponse(db, user, insertTask(db, user, payload, false));
+    }
+
+    static long insertTask(Connection db, Map<String, Object> user, Map<String, Object> payload,
+                           boolean fromImport) throws Exception {
         Accounts.requireDispatcher(user);
         String title = field(payload, "title", "Название", 160, false);
         var place = Places.resolve(db, user, payload);
         String description = field(payload, "description", "Описание", 2000, true);
-        long assignee = findAssignee(db, user, payload);
+        boolean unassigned = fromImport && !payload.containsKey("assigneeId");
+        // The task keeps a user FK until an employee is assigned.
+        long assignee = unassigned ? number(user, "id") : findAssignee(db, user, payload);
+        String status = unassigned ? "unassigned" : "assigned";
         String deadline = timestamp(payload.get("deadline"), "Срок");
         long company = number(user, "company_id");
-        Long manager = FieldWork.assignedManager(db, company, place.objectId(), assignee, payload);
+        Long manager = FieldWork.assignedManager(db, company, place.objectId(), unassigned ? 0 : assignee, payload);
         String purpose = field(payload, "purpose", "Цель выезда", 1000, true);
         int priority = FieldWork.priority(payload);
         String checklist = payload.containsKey("checklist") ? encode(FieldWork.newChecklist(payload.get("checklist"))) : null;
         String pairs = payload.containsKey("photoPairs") ? encode(FieldWork.newPhotoPairs(payload.get("photoPairs"))) : null;
         long id = Db.insert(db, """
             INSERT INTO tasks(company_id, assignee_id, title, object, address, description, location, deadline, object_id,
-                purpose, priority, manager_id, checklist, photo_pairs)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                purpose, priority, manager_id, checklist, photo_pairs, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, company, assignee, title, place.name(), place.address(), description,
-            encode(place.location()), deadline, place.objectId(), purpose, priority, manager, checklist, pairs);
-        recordEvent(db, id, user, "assigned", "", null);
-        return taskResponse(db, user, id);
+            encode(place.location()), deadline, place.objectId(), purpose, priority, manager, checklist, pairs, status);
+        recordEvent(db, id, user, status, fromImport ? "Импорт из Excel" : "", null);
+        return id;
     }
 
     static Map<String, Object> repeatTask(Connection db, Map<String, Object> user, long id,
@@ -334,14 +344,16 @@ final class Tasks {
             return Map.of("key", pair.get("key"), "label", pair.get("label"),
                 "before", active.contains("before"), "after", active.contains("after"));
         }).toList());
-        task.put("assigneeId", row.get("assignee_id").toString());
-        task.put("assigneeName", row.get("assignee_name"));
+        task.put("assigneeId", "unassigned".equals(status) ? null : row.get("assignee_id").toString());
+        task.put("assigneeName", "unassigned".equals(status) ? null : row.get("assignee_name"));
+        task.put("tripId", Objects.toString(row.get("trip_id"), null));
         task.put("managerId", Objects.toString(row.get("manager_id"), null));
         task.put("managerName", row.get("manager_name"));
         task.put("reworkReason", row.get("rework_reason"));
         task.put("objectId", Objects.toString(row.get("object_id"), null));
         task.put("location", decode(row.get("location")));
         task.put("deadline", deadline);
+        task.put("scheduledAt", row.get("scheduled_at"));
         task.put("overdue", overdue(deadline, (String) row.get("status"), events));
         task.put("arrival", decode(row.get("arrival")));
         task.put("repeatOf", Objects.toString(row.get("repeat_of"), null));

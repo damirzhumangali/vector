@@ -76,7 +76,8 @@ final class Sync {
             throw error(400, "Неизвестный вид офлайн-действия.");
         }
         Instant occurredAt = occurrenceTime(field(payload, "occurredAt", "Время действия", 40, false));
-        var body = body(payload.get("body"));
+        // Keep only the validated body so Media can release the Base64 string before encoding.
+        var body = body(payload.remove("body"));
         long expectedRevision = expectedRevision(body.get("expectedRevision"));
         long companyId = number(user, "company_id");
         long actorId = number(user, "id");

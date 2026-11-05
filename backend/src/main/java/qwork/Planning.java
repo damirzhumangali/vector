@@ -207,6 +207,32 @@ final class Planning {
         }
     }
 
+    static Map<String, Object> createImportedTask(Connection db, Map<String, Object> user,
+                                                  Map<String, Object> plan, String assigneeId) throws Exception {
+        Instant start = LocalDate.parse((String) plan.get("startDate"))
+            .atTime(LocalTime.parse((String) plan.get("time"), TIME))
+            .atZone(ZoneId.of((String) plan.get("zone"))).toInstant();
+        String deadline = STAMP.format(start.plus(number(plan, "durationMinutes"), ChronoUnit.MINUTES));
+        long priority = number(plan, "priority");
+        var task = new LinkedHashMap<String, Object>();
+        for (String field : List.of("title", "objectId", "description")) task.put(field, plan.get(field));
+        task.put("deadline", deadline);
+        task.put("priority", taskPriority(priority));
+        if (assigneeId != null) task.put("assigneeId", assigneeId);
+        long id = Tasks.insertTask(db, user, task, true);
+        Db.update(db, """
+            INSERT INTO planned_jobs(company_id, actor_id, object_id, title, description, scheduled_at, deadline,
+                priority, task_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, number(user, "company_id"), number(user, "id"), Long.parseLong((String) plan.get("objectId")),
+            plan.get("title"), plan.get("description"), STAMP.format(start), deadline, priority, id);
+        return Tasks.taskResponse(db, user, id);
+    }
+
+    static int taskPriority(long priority) {
+        return priority < 3 ? 1 : priority == 3 ? 2 : 3;
+    }
+
     private static int generateCompany(Connection db, long company, Instant now) throws SQLException {
         lockCompany(db, company);
         int generated = 0;

@@ -8,15 +8,14 @@ import java.nio.ByteOrder;
 final class JpegOrientation {
     private JpegOrientation() {}
 
-    static BufferedImage normalize(BufferedImage image, byte[] source) {
-        int orientation = orientation(source);
+    static BufferedImage normalize(BufferedImage image, int orientation) {
         if (orientation == 1) return image;
 
         int width = image.getWidth();
         int height = image.getHeight();
         boolean swapAxes = orientation >= 5;
         var result = new BufferedImage(swapAxes ? height : width, swapAxes ? width : height,
-            BufferedImage.TYPE_INT_RGB);
+            BufferedImage.TYPE_3BYTE_BGR);
         var row = new int[width];
         for (int y = 0; y < height; y++) {
             image.getRGB(0, y, width, 1, row, 0, width);
@@ -36,7 +35,7 @@ final class JpegOrientation {
         return result;
     }
 
-    private static int orientation(byte[] jpeg) {
+    static int orientation(byte[] jpeg) {
         if (jpeg.length < 2 || jpeg[0] != (byte) 0xff || jpeg[1] != (byte) 0xd8) return 1;
 
         int offset = 2;

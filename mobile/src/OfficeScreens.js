@@ -108,7 +108,8 @@ function Status({ status }) {
 }
 
 function TaskCard({ task, onPress }) {
-  const initials = (task.assigneeName || 'Исполнитель').split(/\s+/).slice(0, 2).map(name => name[0]).join('');
+  const assigneeName = task.status === 'unassigned' ? '' : task.assigneeName;
+  const initials = assigneeName?.split(/\s+/).slice(0, 2).map(name => name[0]).join('') || '—';
   const content = (
     <>
       <View style={styles.cardTop}>
@@ -122,7 +123,8 @@ function TaskCard({ task, onPress }) {
       <View style={styles.taskMetadata}>
         <View style={styles.avatar}><Text style={styles.avatarText}>{initials}</Text></View>
         <View style={styles.flex}>
-          {task.assigneeName && <Text style={styles.muted}>{task.assigneeName}</Text>}
+          {assigneeName ? <Text style={styles.muted}>{assigneeName}</Text> : null}
+          {task.status === 'unassigned' && task.overdue && <Text style={styles.muted}>Без исполнителя</Text>}
           <View style={styles.inline}><Icon name="pin" size={13} color={colors.muted} /><Text style={[styles.muted, styles.flex]}>{task.object}</Text></View>
           {task.deadline && <View style={styles.inline}><Icon name="calendar" size={13} color={colors.muted} /><Text style={styles.muted}>Срок · {formatDate(task.deadline)}</Text></View>}
         </View>
@@ -679,6 +681,7 @@ function TaskDetails({ task }) {
         {task.repeatReason ? <Text style={styles.muted}>Причина повторного выезда · {task.repeatReason}</Text> : null}
         {task.address && task.address !== task.object ? <Text style={styles.muted}>{task.address}</Text> : null}
         {task.description ? <Text style={styles.muted}>{task.description}</Text> : null}
+        {task.scheduledAt ? <Text style={styles.muted}>Плановое начало · {formatDate(task.scheduledAt)}</Text> : null}
         {task.deadline ? <Text style={styles.muted}>Выполнить до · {formatDate(task.deadline)}</Text> : null}
         {task.result || task.reportComment ? (
           <>
@@ -1075,7 +1078,7 @@ function StaffDirectory({ employees, onRenew, onEditDepartment, onResetPassword,
 export default function OfficeScreens({
   role, tasks, setTasks, session, employees = [], onCreateTask, onUpdateTask, onCreateEmployee,
   onCancelTask, onRepeatTask, onRenewInvite, onSetDepartment, onResetPassword, objects = [], onCreateObject,
-  request, imageSource, onUploadPhoto, onPhotoRejected, section = 'home', onSectionChange, navigationId = 0,
+  request, imageSource, onUploadPhoto, onPhotoRejected, onImportedTasks, section = 'home', onSectionChange, navigationId = 0,
 }) {
   const [creating, setCreating] = useState(section === 'home' ? 'overview' : section === 'tasks' ? null : section);
   const internalNavigation = useRef(null);
@@ -1096,6 +1099,7 @@ export default function OfficeScreens({
   const canReview = manager || role === 'dispatcher';
   const operations = creating === 'operations';
   const planning = creating === 'planning';
+  const importing = creating === 'import-tasks';
   const analytics = creating === 'analytics';
   const fieldOperations = creating === 'field-operations';
   const departmentEmployee = employees.find(employee => employee.id === departmentEmployeeId);
@@ -1156,6 +1160,12 @@ export default function OfficeScreens({
   function openForm(next) {
     setError('');
     navigate(next);
+  }
+
+  function returnToTasks() {
+    setSearch('');
+    setTaskFilter('all');
+    openForm(null);
   }
 
   function createStaff(fields) {
@@ -1267,10 +1277,10 @@ export default function OfficeScreens({
         <View style={styles.heading}>
           <View style={styles.headingCopy}>
             <Text accessibilityRole="header" style={styles.title}>
-              {selected ? 'Карточка заявки' : creating === 'overview' ? 'Главная' : analytics ? 'Аналитика' : planning ? 'Плановые работы' : operations ? 'Рабочее время' : fieldOperations ? 'Выездной контроль' : creating === 'team' ? 'Команда' : creating === 'task' ? 'Новая заявка' : creating ? 'Доступ сотрудника' : manager ? 'Приёмка работ' : 'Заявки'}
+              {selected ? 'Карточка заявки' : creating === 'overview' ? 'Главная' : analytics ? 'Аналитика' : importing ? 'Импорт Excel' : planning ? 'Плановые работы' : operations ? 'Рабочее время' : fieldOperations ? 'Выездной контроль' : creating === 'team' ? 'Команда' : creating === 'task' ? 'Новая заявка' : creating ? 'Доступ сотрудника' : manager ? 'Приёмка работ' : 'Заявки'}
             </Text>
             <Text style={styles.subtitle}>
-              {selected ? `Заявка №${selected.id}` : creating === 'overview' ? 'Все рабочие дела в одном месте' : analytics ? 'Статистика выполнения и выездов' : planning ? 'Повторяющиеся работы и автоназначение' : operations ? 'График, дежурства и согласования' : fieldOperations ? 'Отметки сотрудников, отклонения и командировки' : creating === 'team' ? 'Сотрудники и доступ к компании' : creating === 'task' ? 'Поставьте задачу сотруднику' : creating ? 'Настройте доступ к рабочему пространству' : manager ? 'Проверяйте отчёты сотрудников' : 'Постановка и контроль выездных работ'}
+              {selected ? `Заявка №${selected.id}` : creating === 'overview' ? 'Все рабочие дела в одном месте' : analytics ? 'Статистика выполнения и выездов' : importing ? 'Загрузите таблицу и создайте несколько заявок сразу' : planning ? 'Повторяющиеся работы и автоназначение' : operations ? 'График, дежурства и согласования' : fieldOperations ? 'Отметки сотрудников, отклонения и командировки' : creating === 'team' ? 'Сотрудники и доступ к компании' : creating === 'task' ? 'Поставьте задачу сотруднику' : creating ? 'Настройте доступ к рабочему пространству' : manager ? 'Проверяйте отчёты сотрудников' : 'Постановка и контроль выездных работ'}
             </Text>
           </View>
           {!manager && !creating && !selected && <Pressable accessibilityRole="button" accessibilityLabel="Создать заявку" onPress={() => openForm('task')} style={styles.addButton}><Icon name="plus" color="#FFFFFF" size={24} /></Pressable>}
@@ -1383,6 +1393,14 @@ export default function OfficeScreens({
           </>
         )}
 
+        {importing && !manager && server && request && (
+          <>
+            <Button onPress={() => openForm(null)} secondary>‹ К заявкам</Button>
+            <PlanningScreens request={request} objects={objects} direct
+              onImportedTasks={onImportedTasks} onBackToTasks={returnToTasks} />
+          </>
+        )}
+
         {analytics && server && request && (
           <>
             <Button onPress={() => openForm(null)} secondary>{manager ? '‹ К приёмке' : '‹ К заявкам'}</Button>
@@ -1460,6 +1478,7 @@ export default function OfficeScreens({
 
         {!manager && !creating && !selected && (
           <>
+            {server && request && <Button onPress={() => openForm('import-tasks')} secondary>Импорт Excel</Button>}
             <View style={styles.segmented}>
               {[['all', 'Все'], ['active', 'В работе'], ['review', 'На проверке'], ['overdue', 'Просрочены']].map(([key, label]) => <Pressable
                 accessibilityRole="tab" accessibilityState={{ selected: taskFilter === key }} key={key} onPress={() => setTaskFilter(key)}

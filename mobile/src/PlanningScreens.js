@@ -162,11 +162,12 @@ function TemplateForm({ template, objects, busy, onSave, onCancel }) {
 
 async function pickWorkbook() {
   const result = await getDocumentAsync({
-    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    type: '*/*',
+    base64: true,
     copyToCacheDirectory: true,
     multiple: false,
   });
-  if (result.canceled) return null;
+  if (result.canceled || !result.assets?.length) return null;
   const asset = result.assets[0];
   const file = asset.file ? null : new File(asset.uri);
   try {
@@ -186,13 +187,24 @@ async function pickWorkbook() {
   }
 }
 
-function ImportPanel({ objects, request, busy, run }) {
+function ImportPanel({ objects, request, busy, run, direct, onImportedTasks, onBackToTasks }) {
   const [file, setFile] = useState(null);
   const [result, setResult] = useState(null);
   const [imported, setImported] = useState(false);
   const [showObjects, setShowObjects] = useState(false);
   const rows = result?.rows ?? [];
   const validCount = rows.filter(row => !row.error && !row.duplicate).length;
+
+  async function submitWorkbook(base64, previewOnly) {
+    const body = direct ? { base64, mode: 'tasks' } : { base64 };
+    const response = await request(previewOnly ? '/planning/import/preview' : '/planning/import', {
+      method: 'POST', body, timeout: 60000,
+    });
+    if (direct && response.mode !== 'tasks') {
+      throw new Error('Для импорта в список заявок нужно обновить сервер qwork.');
+    }
+    return response;
+  }
 
   function preview() {
     run(async () => {
@@ -202,9 +214,7 @@ function ImportPanel({ objects, request, busy, run }) {
         setImported(false);
         setResult(null);
         setFile(next);
-        setResult(await request('/planning/import/preview', {
-          method: 'POST', body: { base64: next.base64 }, timeout: 30000,
-        }));
+        setResult(await submitWorkbook(next.base64, true));
       } catch (failure) {
         setImported(false);
         setFile(null);
@@ -217,7 +227,8 @@ function ImportPanel({ objects, request, busy, run }) {
   function commit() {
     if (!file || !validCount || imported) return;
     run(async () => {
-      const response = await request('/planning/import', { method: 'POST', body: { base64: file.base64 }, timeout: 30000 });
+      const response = await submitWorkbook(file.base64, false);
+      if (direct) onImportedTasks?.(response.tasks);
       setResult(response);
       setImported(true);
       setFile({ name: file.name });
@@ -226,12 +237,19 @@ function ImportPanel({ objects, request, busy, run }) {
 
   return (
     <View style={styles.card}>
-      <Text accessibilityRole="header" style={styles.title}>Импорт Excel</Text>
-      <Text style={styles.muted}>
-        Первая строка листа должна содержать колонки «Название», «ID объекта», «Дата», «Время».
-        Можно добавить «Описание», «Приоритет» и «Длительность, мин».
-      </Text>
-      <Text style={styles.muted}>Укажите дату и время в формате ГГГГ-ММ-ДД и ЧЧ:ММ. Файл .xlsx до 2 МБ и 200 строк.</Text>
+      {!direct && <Text accessibilityRole="header" style={styles.title}>Импорт в план</Text>}
+      {direct ? (
+        <>
+          <Text style={styles.muted}>Первая строка листа должна содержать «Название», «Дата», «Время» и одну из колонок «Объект» или «ID объекта». Укажите название объекта из справочника.</Text>
+          <Text style={styles.muted}>Можно добавить «Описание», «Приоритет» от 1 до 5, «Длительность, мин» и «Логин исполнителя». Если логин пуст, назначьте сотрудника позже в карточке заявки.</Text>
+        </>
+      ) : (
+        <Text style={styles.muted}>
+          Первая строка листа должна содержать колонки «Название», «ID объекта», «Дата», «Время».
+          Можно добавить «Описание», «Приоритет» и «Длительность, мин».
+        </Text>
+      )}
+      <Text style={styles.muted}>Дата и время принимаются как ячейки Excel или текст в формате ГГГГ-ММ-ДД и ЧЧ:ММ. Файл .xlsx до 2 МБ и 200 строк.</Text>
       <Action secondary onPress={() => setShowObjects(!showObjects)}>{showObjects ? 'Скрыть ID объектов' : 'Показать ID объектов'}</Action>
       {showObjects && (objects.length ? objects.map(object => (
         <Text key={object.id} selectable style={styles.muted}>{object.id} · {object.name}</Text>
@@ -241,20 +259,30 @@ function ImportPanel({ objects, request, busy, run }) {
       {result && (
         <>
           <Text accessibilityRole="header" accessibilityLiveRegion="polite" style={styles.title}>
-            {imported ? `Добавлено заявок · ${result.imported}` : `Предпросмотр · ${validCount} к импорту из ${rows.length}`}
+            {imported
+              ? `${direct ? 'Создано заявок' : 'Импортировано в план'} · ${result.imported}`
+              : `Предпросмотр · ${validCount} к импорту из ${rows.length}`}
           </Text>
+          {direct && imported && result.imported > 0 && <Action onPress={onBackToTasks}>Перейти к заявкам</Action>}
+          {direct && !imported && (
+            <Action onPress={commit} disabled={busy || !validCount}>Создать заявки · {validCount}</Action>
+          )}
           {rows.map(row => (
             <View key={row.row} style={styles.row}>
               <Text style={styles.label}>Строка {row.row}{row.title ? ` · ${row.title}` : ''}</Text>
               <Text style={styles.muted}>
-                {[row.startDate, row.time, row.objectId ? `объект №${row.objectId}` : null].filter(Boolean).join(' · ')}
+                {[row.startDate, row.time, row.objectName || (row.objectId ? `объект №${row.objectId}` : null)]
+                  .filter(Boolean).join(' · ')}
               </Text>
+              {direct && !row.error && !row.duplicate && (
+                <Text style={styles.muted}>{row.assigneeName || row.assigneeLogin || 'Без исполнителя'}</Text>
+              )}
               <Text style={row.error ? styles.error : row.duplicate ? styles.warning : styles.success}>
-                {row.error || (row.duplicate ? 'Уже есть в плане' : imported ? 'Добавлена' : 'Готова к импорту')}
+                {row.error || (row.duplicate ? 'Уже импортирована' : imported ? 'Добавлена' : 'Готова к импорту')}
               </Text>
             </View>
           ))}
-          {!imported && <Action onPress={commit} disabled={busy || !validCount}>Импортировать корректные строки</Action>}
+          {!direct && !imported && <Action onPress={commit} disabled={busy || !validCount}>Импортировать корректные строки</Action>}
         </>
       )}
     </View>
@@ -301,7 +329,7 @@ function AssignmentPanel({ settings, jobs, busy, onSave, onAssign, onRefresh, on
             <Text style={styles.muted}>Начало · {timeLabel(job.scheduledAt)}. Срок · {timeLabel(job.deadline)}</Text>
             <Text style={job.overdue ? styles.warning : styles.muted}>
               {LINKED_STATUSES[job.taskStatus] || JOB_STATUSES[job.status] || job.status}{job.overdue ? ' · Просрочена' : ''}
-              {job.assigneeName ? ` · ${job.assigneeName}` : ''}
+              {job.assigneeName && job.taskStatus !== 'unassigned' ? ` · ${job.assigneeName}` : ''}
             </Text>
             {job.taskId && taskIds.has(String(job.taskId)) && (
               <Action onPress={() => onOpenTask(String(job.taskId))} secondary>Открыть заявку №{job.taskId}</Action>
@@ -314,8 +342,8 @@ function AssignmentPanel({ settings, jobs, busy, onSave, onAssign, onRefresh, on
   );
 }
 
-export default function PlanningScreens({ request, objects, tasks, onOpenTask }) {
-  const [tab, setTab] = useState('jobs');
+export default function PlanningScreens({ request, objects, tasks, onOpenTask, direct = false, onImportedTasks, onBackToTasks }) {
+  const [tab, setTab] = useState(direct ? 'import' : 'jobs');
   const [jobs, setJobs] = useState([]);
   const [settings, setSettings] = useState(null);
   const [templates, setTemplates] = useState(null);
@@ -413,8 +441,8 @@ export default function PlanningScreens({ request, objects, tasks, onOpenTask })
 
   return (
     <>
-      <Choices value={tab} items={[['jobs', 'Очередь'], ['templates', 'Шаблоны'], ['import', 'Импорт Excel']]}
-        onChange={selectTab} />
+      {!direct && <Choices value={tab} items={[['jobs', 'Очередь'], ['templates', 'Шаблоны'], ['import', 'Импорт Excel']]}
+        onChange={selectTab} />}
       {error ? <Text accessibilityRole="alert" style={styles.error}>{error}</Text> : null}
       {message ? <Text accessibilityLiveRegion="polite" style={styles.success}>{message}</Text> : null}
       {busy && <Text accessibilityLiveRegion="polite" style={styles.muted}>Загрузка…</Text>}
@@ -447,7 +475,8 @@ export default function PlanningScreens({ request, objects, tasks, onOpenTask })
           {!templates && !busy && <Action onPress={refresh} secondary>Загрузить шаблоны</Action>}
         </View>
       ))}
-      {tab === 'import' && <ImportPanel objects={objects} request={request} busy={busy} run={run} />}
+      {tab === 'import' && <ImportPanel objects={objects} request={request} busy={busy} run={run}
+        direct={direct} onImportedTasks={onImportedTasks} onBackToTasks={onBackToTasks} />}
     </>
   );
 }

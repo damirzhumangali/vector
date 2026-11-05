@@ -3,7 +3,10 @@ import { AppState, Pressable, ScrollView, StyleSheet, Text, TextInput, View } fr
 import { randomUUID } from 'expo-crypto';
 import { Icon } from './ui';
 
-const EMPTY = { shifts: [], days: [], reminders: [], incidents: [], unavailableEmployeeIds: [], scheduleLoaded: false };
+const EMPTY = {
+  shifts: [], days: [], reminders: [], incidents: [], unavailableEmployeeIds: [], scheduleLoaded: false,
+  trips: [], tripRequests: [], tripsLoaded: false,
+};
 const CLOSED_TASKS = new Set(['done', 'cancelled', 'repeated', 'review']);
 const INCIDENT_NAMES = {
   urgent_leave: 'Срочный уход', lateness: 'Опоздание', emergency: 'Аварийное назначение',
@@ -38,6 +41,20 @@ function shiftPeriod(shift, today) {
   return `${startLabel} — ${endLabel}`;
 }
 
+function tripPeriod({ plannedStart, plannedEnd }) {
+  const start = new Date(plannedStart);
+  const end = new Date(plannedEnd);
+  const format = date => date.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
+  return localDate(start) === localDate(end) ? format(start) : `${format(start)} — ${format(end)}`;
+}
+
+function periodCoversDay(startsAt, endsAt, date) {
+  const start = new Date(`${date}T00:00:00`);
+  const next = new Date(start);
+  next.setDate(next.getDate() + 1);
+  return +new Date(startsAt) < +next && +new Date(endsAt) > +start;
+}
+
 function isoDateTime(date, time) {
   const match = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})$/.exec(date + ' ' + time);
   if (!match) return null;
@@ -70,6 +87,22 @@ function Action({ children, onPress, disabled = false, primary = false, selected
   );
 }
 
+function ActionRow({ title, detail, icon, onPress, expanded, disabled = false, warning = false }) {
+  return (
+    <Pressable accessibilityRole="button" accessibilityState={{ disabled, expanded }} disabled={disabled} onPress={onPress}
+      style={({ pressed }) => [styles.actionRow, (pressed || disabled) && styles.dim]}>
+      <View style={[styles.cardIcon, warning && styles.cardIconWarning]}>
+        <Icon name={icon} size={19} color={warning ? '#AB600D' : '#087CFF'} />
+      </View>
+      <View style={styles.rowCopy}>
+        <Text style={styles.label}>{title}</Text>
+        {detail ? <Text style={styles.muted}>{detail}</Text> : null}
+      </View>
+      <Icon name="chevron-right" size={17} color="#667E9E" style={expanded && styles.chevronDown} />
+    </Pressable>
+  );
+}
+
 function Field({ label, value, onChange, placeholder, numeric = false, limit = 1000 }) {
   return (
     <View style={styles.field}>
@@ -91,24 +124,39 @@ function Choices({ rows, selected, onSelect, empty = 'Нет доступных 
   );
 }
 
-function useShiftData(request, offline, onShifts, includeIncidents = true) {
+function useShiftData(request, offline, onShifts, includeIncidents = true, includeTrips = false) {
   const [data, setData] = useState(EMPTY);
   const [error, setError] = useState('');
+  const [tripError, setTripError] = useState('');
   const current = useRef(0);
   const callback = useRef(onShifts);
   useEffect(() => { callback.current = onShifts; }, [onShifts]);
   const reload = useCallback(async () => {
     if (!request || offline) return;
     const version = ++current.current;
-    const results = await Promise.allSettled([
+    const schedule = Promise.allSettled([
       request('/shifts'),
       includeIncidents ? request('/incidents') : Promise.resolve(null),
     ]);
+    const tripsUpdate = includeTrips ? Promise.allSettled([request('/trips'), request('/trip-requests')])
+      .then(([trip, tripRequest]) => {
+        if (current.current !== version) return;
+        const tripList = trip.status === 'fulfilled' ? trip.value?.trips : null;
+        const requests = tripRequest.status === 'fulfilled' ? tripRequest.value?.requests : null;
+        setData(previous => ({
+          ...previous,
+          trips: tripList ?? previous.trips,
+          tripRequests: requests ?? previous.tripRequests,
+          tripsLoaded: previous.tripsLoaded || Array.isArray(tripList),
+        }));
+        setTripError(trip.status === 'rejected' ? trip.reason?.message || 'Не удалось загрузить командировки.' : '');
+      }) : null;
+    const [shift, incident] = await schedule;
     if (current.current !== version) return;
-    const [shift, incident] = results;
     const shifts = shift.status === 'fulfilled' ? shift.value : null;
     const incidents = incident.status === 'fulfilled' ? incident.value?.incidents : null;
     setData(previous => ({
+      ...previous,
       shifts: shifts?.shifts ?? previous.shifts,
       days: shifts?.days ?? previous.days,
       reminders: shifts?.reminders ?? previous.reminders,
@@ -117,8 +165,9 @@ function useShiftData(request, offline, onShifts, includeIncidents = true) {
       scheduleLoaded: previous.scheduleLoaded || Array.isArray(shifts?.shifts),
     }));
     if (shifts?.shifts) callback.current?.(shifts.shifts);
-    setError(results.find(result => result.status === 'rejected')?.reason?.message ?? '');
-  }, [request, offline, includeIncidents]);
+    setError([shift, incident].find(result => result.status === 'rejected')?.reason?.message ?? '');
+    await tripsUpdate;
+  }, [request, offline, includeIncidents, includeTrips]);
 
   useEffect(() => {
     void reload();
@@ -130,7 +179,7 @@ function useShiftData(request, offline, onShifts, includeIncidents = true) {
       clearInterval(timer);
     };
   }, [reload]);
-  return { data, reload, error };
+  return { data, reload, error, tripError };
 }
 
 function useAction(reload, onChange) {
@@ -191,7 +240,7 @@ function ShiftSummary({ shift }) {
   );
 }
 
-function ShiftOverview({ shift, nextShift, incidents, now, scheduleLoaded, scheduleUnavailable, children }) {
+function ShiftOverview({ shift, nextShift, now, scheduleLoaded, scheduleUnavailable, children }) {
   const date = new Date(now);
   const today = localDate(date);
   let status = 'На сегодня смены нет';
@@ -215,7 +264,6 @@ function ShiftOverview({ shift, nextShift, incidents, now, scheduleLoaded, sched
         <Text style={styles.shiftStatus}>{status}</Text>
         {shift && <Text style={styles.shiftPeriod}>{shiftPeriod(shift, today)}</Text>}
         {shift?.finishedAt && <Text style={styles.muted}>Отметка о завершении · {timeLabel(shift.finishedAt)}</Text>}
-        {!shift && scheduleLoaded && !nextShift && <Text style={styles.muted}>Диспетчер назначает смены в календаре компании.</Text>}
       </View>
       {children}
       {nextShift && (
@@ -227,10 +275,7 @@ function ShiftOverview({ shift, nextShift, incidents, now, scheduleLoaded, sched
           </View>
         </View>
       )}
-      {scheduleLoaded && <View style={styles.summaryTiles}>
-        <View style={styles.summaryTile}><Text style={styles.summaryNumber}>{shift?.overtimeMinutes ?? 0} мин</Text><Text style={styles.muted}>Сверхурочные</Text></View>
-        <View style={styles.summaryTile}><Text style={styles.summaryNumber}>{incidents.filter(incident => incident.status === 'open').length}</Text><Text style={styles.muted}>Ожидают решения</Text></View>
-      </View>}
+      {shift?.overtimeMinutes > 0 && <Text style={styles.overtime}>Сверхурочные · {shift.overtimeMinutes} мин</Text>}
     </Card>
   );
 }
@@ -259,12 +304,18 @@ export function EmployeeShiftReminder({ request, offline = false, onOpen, onShif
 
 const leaveReasons = ['Здоровье', 'Семейные обстоятельства', 'Транспорт', 'Другая причина'];
 
-function UrgentLeave({ request, onUrgentLeave, offline, incident, pending, busy, run }) {
+function UrgentLeave({ request, onUrgentLeave, offline, incident, pending, busy, run, opened, onToggle }) {
   const [reason, setReason] = useState('');
   const [safe, setSafe] = useState(null);
-  const [opened, setOpened] = useState(false);
+  if (!incident && !pending && !opened) return (
+    <ActionRow title="Сообщить о срочном уходе" icon="alert" warning expanded={false}
+      disabled={busy || (offline && !onUrgentLeave)} onPress={onToggle} />
+  );
   return (
-    <Card title="Срочный уход" warning={Boolean(incident)}>
+    <View style={styles.requestForm}>
+      {incident || pending ? <Text style={styles.label}>Срочный уход</Text> : (
+        <ActionRow title="Срочный уход" icon="alert" warning expanded disabled={busy} onPress={onToggle} />
+      )}
       {incident ? (
         <>
           <Text style={styles.muted}>Вы недоступны для новых назначений. {incident.reason}</Text>
@@ -275,8 +326,6 @@ function UrgentLeave({ request, onUrgentLeave, offline, incident, pending, busy,
         </>
       ) : pending ? (
         <Text style={styles.muted}>Срочный уход сохранён на телефоне и ожидает отправки.</Text>
-      ) : !opened ? (
-        <Action disabled={busy || (offline && !onUrgentLeave)} onPress={() => setOpened(true)}>Сообщить о срочном уходе</Action>
       ) : (
         <>
           <Text style={styles.muted}>Неначатые заявки вернутся диспетчеру. Уже начатая работа будет приостановлена с сохранением отчёта.</Text>
@@ -290,49 +339,48 @@ function UrgentLeave({ request, onUrgentLeave, offline, incident, pending, busy,
               () => onUrgentLeave ? onUrgentLeave(body) : post(request, '/incidents', { ...body, eventId: randomUUID() }),
               onUrgentLeave ? 'Сообщение сохранено и будет отправлено при связи.' : 'Срочный уход зарегистрирован',
             )) {
-              setOpened(false);
+              onToggle();
               setReason('');
               setSafe(null);
             }
           }}>Подтвердить срочный уход</Action>
-          <Action disabled={busy} onPress={() => setOpened(false)}>Отмена</Action>
+          <Action disabled={busy} onPress={onToggle}>Отмена</Action>
         </>
       )}
-    </Card>
+    </View>
   );
 }
 
-function LatenessForm({ request, tasks, busy, run, offline }) {
+function LatenessForm({ request, tasks, busy, run, offline, opened, onToggle }) {
   const [taskId, setTaskId] = useState(null);
   const [minutes, setMinutes] = useState('');
   const [reason, setReason] = useState('');
-  const [opened, setOpened] = useState(false);
   const duration = Number(minutes);
+  if (!opened) return (
+    <ActionRow title="Сообщить об опоздании" icon="clock" expanded={false} disabled={busy || offline} onPress={onToggle} />
+  );
   return (
-    <Card title="Опоздание">
-      {!opened ? <Action disabled={offline} onPress={() => setOpened(true)}>Сообщить об опоздании</Action> : (
-        <>
-          <Field label="На сколько минут" value={minutes} onChange={setMinutes} numeric limit={4} />
-          <Field label="Причина опоздания" value={reason} onChange={setReason} limit={500} />
-          <Text style={styles.label}>Связанная заявка (необязательно)</Text>
-          <Choices rows={[{ id: '', label: 'Без заявки' }, ...tasks.filter(task => !CLOSED_TASKS.has(task.status))
-            .map(task => ({ id: task.id, label: '№' + task.id + ' · ' + task.title }))]}
-            selected={taskId ?? ''} onSelect={setTaskId} />
-          <Action primary disabled={busy || offline || !Number.isInteger(duration) || duration < 1 || duration > 1440 || !reason.trim()}
-            onPress={async () => {
-              if (await run(() => post(request, '/incidents', {
-                kind: 'lateness', minutes: duration, reason: reason.trim(), ...(taskId ? { taskId } : {}),
-              }), 'Опоздание передано руководителю')) {
-                setOpened(false);
-                setMinutes('');
-                setReason('');
-                setTaskId(null);
-              }
-            }}>Отправить</Action>
-          <Action disabled={busy} onPress={() => setOpened(false)}>Отмена</Action>
-        </>
-      )}
-    </Card>
+    <View style={styles.requestForm}>
+      <ActionRow title="Опоздание" icon="clock" expanded disabled={busy} onPress={onToggle} />
+      <Field label="На сколько минут" value={minutes} onChange={setMinutes} numeric limit={4} />
+      <Field label="Причина опоздания" value={reason} onChange={setReason} limit={500} />
+      <Text style={styles.label}>Связанная заявка (необязательно)</Text>
+      <Choices rows={[{ id: '', label: 'Без заявки' }, ...tasks.filter(task => !CLOSED_TASKS.has(task.status))
+        .map(task => ({ id: task.id, label: '№' + task.id + ' · ' + task.title }))]}
+        selected={taskId ?? ''} onSelect={setTaskId} />
+      <Action primary disabled={busy || offline || !Number.isInteger(duration) || duration < 1 || duration > 1440 || !reason.trim()}
+        onPress={async () => {
+          if (await run(() => post(request, '/incidents', {
+            kind: 'lateness', minutes: duration, reason: reason.trim(), ...(taskId ? { taskId } : {}),
+          }), 'Опоздание передано руководителю')) {
+            onToggle();
+            setMinutes('');
+            setReason('');
+            setTaskId(null);
+          }
+        }}>Отправить</Action>
+      <Action disabled={busy} onPress={onToggle}>Отмена</Action>
+    </View>
   );
 }
 
@@ -406,11 +454,36 @@ function ShiftChoice({ shift, reminder, tasks, request, busy, offline, run }) {
   );
 }
 
+function TripOverview({ trip, pending, loaded, offline, error, onTrips }) {
+  const active = trip?.status === 'active';
+  const detail = trip ? `${trip.destination} · ${tripPeriod(trip)}`
+    : offline ? 'Для обновления нужна связь.'
+      : loaded ? 'Согласованные поездки появятся здесь.' : error ? undefined : 'Загружаем поездки…';
+  return (
+    <Card>
+      <ActionRow title={active ? 'Текущая командировка' : trip ? 'Ближайшая командировка' : 'Мои командировки'}
+        detail={detail} icon="briefcase" onPress={() => onTrips(trip ? { tripId: trip.id } : {})} />
+      {pending.length > 0 && <ActionRow title="На согласовании" detail={pending.length === 1
+        ? `${pending[0].destination} · ${tripPeriod(pending[0])}` : `Запросов: ${pending.length}`}
+        icon="clock" onPress={() => onTrips(pending.length === 1 ? { requestId: pending[0].id } : {})} />}
+      {trip && <Action onPress={() => onTrips({})}>Все командировки</Action>}
+      {!trip && <Action primary disabled={offline} onPress={() => onTrips({ view: 'request' })}>
+        Запросить командировку
+      </Action>}
+      {error && !offline && <Text style={styles.muted}>Не удалось обновить командировки.</Text>}
+    </Card>
+  );
+}
+
 export function EmployeeShiftPanel({ request, onUrgentLeave, offline = false, onChange, onShifts, tasks = [],
   urgentLeavePending = false, onTrips }) {
-  const { data, reload, error } = useShiftData(request, offline, onShifts);
+  const { data, reload, error, tripError } = useShiftData(request, offline, onShifts, true, Boolean(onTrips));
   const { busy, notice, run } = useAction(reload, onChange);
   const [now, setNow] = useState(Date.now);
+  const [openRequest, setOpenRequest] = useState(null);
+  const [showHistory, setShowHistory] = useState(false);
+  const [showSchedule, setShowSchedule] = useState(false);
+  const [scheduleDate, setScheduleDate] = useState(localDate);
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 15000);
     return () => clearInterval(timer);
@@ -425,12 +498,22 @@ export function EmployeeShiftPanel({ request, onUrgentLeave, offline = false, on
   const todayFinished = latestShift?.finishedAt && localDate(new Date(latestShift.finishedAt)) === today ? latestShift : null;
   const displayedShift = activeShift ?? todayUpcoming ?? todayFinished;
   const showShiftChoice = activeShift && !data.reminders.some(reminder => reminder.shiftId === activeShift.id);
+  const nextTrip = data.trips.find(trip => trip.status === 'active') ?? data.trips
+    .filter(trip => trip.status === 'planned' && +new Date(trip.plannedEnd) > now)
+    .sort((a, b) => +new Date(a.plannedStart) - +new Date(b.plannedStart))[0];
+  const pendingTrips = data.tripRequests.filter(trip => trip.status === 'pending');
+  const scheduledShifts = data.shifts.filter(shift => periodCoversDay(shift.startsAt, shift.endsAt, scheduleDate));
+  const scheduledTrips = data.trips.filter(trip => periodCoversDay(trip.plannedStart, trip.plannedEnd, scheduleDate));
+  const pendingIncidents = data.incidents.filter(incident => incident.status === 'open').length;
+  const toggleRequest = key => setOpenRequest(current => current === key ? null : key);
   return (
     <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-      <View style={styles.pageHeading}><Text accessibilityRole="header" style={styles.title}>Рабочее время</Text><Text style={styles.muted}>Смены, дежурства и обращения</Text></View>
-      {onTrips && <Action onPress={onTrips}>Мои командировки</Action>}
+      <View style={styles.pageHeading}>
+        <Text accessibilityRole="header" style={styles.title}>Рабочее время</Text>
+        <Text style={styles.muted}>Смены, дежурства и поездки</Text>
+      </View>
       <ShiftOverview shift={displayedShift} nextShift={upcomingShift === displayedShift ? null : upcomingShift}
-        incidents={data.incidents} now={now} scheduleLoaded={data.scheduleLoaded} scheduleUnavailable={offline || Boolean(error)}>
+        now={now} scheduleLoaded={data.scheduleLoaded} scheduleUnavailable={offline || Boolean(error)}>
         {showShiftChoice && <ShiftChoice key={activeShift.id} shift={activeShift}
           tasks={tasks} request={request} busy={busy} offline={offline} run={run} />}
       </ShiftOverview>
@@ -444,23 +527,46 @@ export function EmployeeShiftPanel({ request, onUrgentLeave, offline = false, on
       ))}
       {emergencies.map(incident => <EmployeeEmergency key={incident.id} incident={incident}
         request={request} busy={busy} offline={offline} run={run} />)}
+      {onTrips && <TripOverview trip={nextTrip} pending={pendingTrips} loaded={data.tripsLoaded} offline={offline}
+        error={tripError} onTrips={onTrips} />}
       <Text accessibilityRole="header" style={styles.sectionTitle}>Мои обращения</Text>
-      <UrgentLeave request={request} onUrgentLeave={onUrgentLeave} offline={offline} incident={urgent}
-        pending={urgentLeavePending} busy={busy} run={run} />
-      <LatenessForm request={request} tasks={tasks} busy={busy} run={run} offline={offline} />
-      {data.scheduleLoaded && <Card title="График">
-        {data.shifts.length === 0 && <Text style={styles.muted}>Назначенные смены появятся здесь.</Text>}
-        {data.shifts.map(shift => <ShiftSummary key={shift.id} shift={shift} />)}
-      </Card>}
-      <Card title="История ситуаций">
-        {data.incidents.length === 0 && <Text style={styles.muted}>Записей пока нет.</Text>}
-        {data.incidents.map(incident => <View key={incident.id} style={styles.listItem}><IncidentSummary incident={incident} /></View>)}
+      <Card>
+        <UrgentLeave request={request} onUrgentLeave={onUrgentLeave} offline={offline} incident={urgent}
+          pending={urgentLeavePending} busy={busy} run={run} opened={openRequest === 'leave'} onToggle={() => toggleRequest('leave')} />
+        <View style={styles.rowDivider} />
+        <LatenessForm request={request} tasks={tasks} busy={busy} run={run} offline={offline}
+          opened={openRequest === 'lateness'} onToggle={() => toggleRequest('lateness')} />
+        {data.incidents.length > 0 && <>
+          <View style={styles.rowDivider} />
+          <ActionRow title="История обращений" icon="clipboard" expanded={showHistory}
+            detail={pendingIncidents > 0 ? `Ожидают решения: ${pendingIncidents}` : undefined}
+            onPress={() => setShowHistory(value => !value)} />
+          {showHistory && data.incidents.map(incident => <View key={incident.id} style={styles.listItem}><IncidentSummary incident={incident} /></View>)}
+        </>}
       </Card>
+      {(data.scheduleLoaded || data.tripsLoaded) && <Card>
+        <ActionRow title="Мой график" icon="calendar" detail="Смены, дежурства и командировки" expanded={showSchedule}
+          onPress={() => setShowSchedule(value => !value)} />
+        {showSchedule && <>
+          <MonthCalendar date={scheduleDate} onSelect={setScheduleDate} days={data.days} shifts={data.shifts} trips={data.trips} />
+          <View style={styles.calendarLegend}>
+            <View style={styles.legendItem}><View style={styles.calendarDot} /><Text style={styles.muted}>Смена или дежурство</Text></View>
+            <View style={styles.legendItem}><View style={[styles.calendarDot, styles.tripDot]} /><Text style={styles.muted}>Командировка</Text></View>
+          </View>
+          <Text style={styles.label}>{new Date(`${scheduleDate}T12:00:00`).toLocaleDateString('ru-RU', {
+            weekday: 'long', day: 'numeric', month: 'long',
+          })}</Text>
+          {scheduledShifts.map(shift => <ShiftSummary key={shift.id} shift={shift} />)}
+          {scheduledTrips.map(trip => <ActionRow key={trip.id} title={trip.destination} icon="briefcase"
+            detail={`Командировка · ${tripPeriod(trip)}`} onPress={() => onTrips?.({ tripId: trip.id })} />)}
+          {!scheduledShifts.length && !scheduledTrips.length && <Text style={styles.muted}>На этот день ничего не запланировано.</Text>}
+        </>}
+      </Card>}
     </ScrollView>
   );
 }
 
-function MonthCalendar({ date, onSelect, days, shifts }) {
+function MonthCalendar({ date, onSelect, days, shifts, trips }) {
   const [monthOffset, setMonthOffset] = useState(0);
   const today = new Date();
   const month = new Date(today.getFullYear(), today.getMonth() + monthOffset, 1);
@@ -471,7 +577,9 @@ function MonthCalendar({ date, onSelect, days, shifts }) {
     if (day < 1 || day > total) return null;
     const value = localDate(new Date(month.getFullYear(), month.getMonth(), day));
     return { day, value, schedule: days.find(row => row.date === value),
-      count: shifts.filter(shift => (shift.date ?? localDate(new Date(shift.startsAt))) === value).length };
+      count: shifts.filter(shift => trips ? periodCoversDay(shift.startsAt, shift.endsAt, value)
+        : (shift.date ?? localDate(new Date(shift.startsAt))) === value).length,
+      trip: trips?.some(trip => periodCoversDay(trip.plannedStart, trip.plannedEnd, value)) };
   });
   return (
     <>
@@ -485,12 +593,16 @@ function MonthCalendar({ date, onSelect, days, shifts }) {
           <View key={day} style={styles.calendarCell}><Text style={styles.muted}>{day}</Text></View>
         ))}
         {cells.map((cell, index) => cell ? (
-          <Pressable accessibilityRole="button" accessibilityLabel={cell.value} accessibilityState={{ selected: date === cell.value }}
+          <Pressable accessibilityRole="button" accessibilityLabel={cell.trip ? `${cell.value}, командировка` : cell.value}
+            accessibilityState={{ selected: date === cell.value }}
             key={cell.value} style={[styles.calendarCell, styles.calendarDay,
               cell.schedule?.type === 'holiday' && styles.warning, date === cell.value && styles.selected]}
             onPress={() => onSelect(cell.value)}>
             <Text style={[styles.label, cell.schedule?.type === 'holiday' && styles.holidayText, date === cell.value && styles.primaryText]}>{cell.day}</Text>
-            {cell.count > 0 && <View style={[styles.calendarDot, date === cell.value && styles.whiteDot]} />}
+            {(cell.count > 0 || cell.trip) && <View style={styles.calendarDots}>
+              {cell.count > 0 && <View style={[styles.calendarDot, date === cell.value && styles.whiteDot]} />}
+              {cell.trip && <View style={[styles.calendarDot, styles.tripDot, date === cell.value && styles.selectedTripDot]} />}
+            </View>}
           </Pressable>
         ) : <View key={'blank-' + index} style={styles.calendarCell} />)}
       </View>
@@ -746,6 +858,11 @@ const styles = StyleSheet.create({
   choices: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
   listItem: { gap: 7, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#ECF0F7', paddingTop: 10 },
   summaryRow: { flexDirection: 'row', gap: 10, alignItems: 'center' },
+  actionRow: { minHeight: 48, paddingVertical: 4, flexDirection: 'row', gap: 10, alignItems: 'center' },
+  rowCopy: { flex: 1, minWidth: 0, gap: 3 },
+  chevronDown: { transform: [{ rotate: '90deg' }] },
+  rowDivider: { height: StyleSheet.hairlineWidth, backgroundColor: '#E3EAF4' },
+  requestForm: { gap: 9 },
   sectionHeading: { flexDirection: 'row', gap: 10, alignItems: 'center' },
   cardIcon: { width: 34, height: 34, borderRadius: 10, backgroundColor: '#EDF5FF', alignItems: 'center', justifyContent: 'center' },
   cardIconWarning: { backgroundColor: '#FFF0D8' },
@@ -756,6 +873,11 @@ const styles = StyleSheet.create({
   calendarDay: { borderRadius: 9, minHeight: 39, gap: 3 },
   calendarCount: { color: '#087CFF', fontSize: 10, fontWeight: '600' },
   calendarDot: { width: 4, height: 4, borderRadius: 2, backgroundColor: '#087CFF' },
+  calendarDots: { flexDirection: 'row', gap: 4 },
+  calendarLegend: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
+  legendItem: { flexDirection: 'row', gap: 5, alignItems: 'center' },
+  tripDot: { backgroundColor: '#16865F' },
+  selectedTripDot: { backgroundColor: '#A7F2D5' },
   whiteDot: { backgroundColor: '#FFFFFF' },
   holidayText: { color: '#ED6781' },
   shiftBadge: { color: '#087CFF', fontSize: 12, backgroundColor: '#EDF5FF', alignSelf: 'flex-start', borderRadius: 5, paddingHorizontal: 7, paddingVertical: 4 },
@@ -763,9 +885,6 @@ const styles = StyleSheet.create({
   shiftStatusPanel: { backgroundColor: '#F1F6FF', borderRadius: 11, padding: 13, gap: 5 },
   shiftStatus: { color: '#142034', fontSize: 19, fontWeight: '700', letterSpacing: -0.4 },
   shiftPeriod: { color: '#087CFF', fontSize: 15, fontWeight: '600', fontVariant: ['tabular-nums'] },
-  summaryTiles: { flexDirection: 'row', gap: 9 },
-  summaryTile: { flex: 1, backgroundColor: '#F5F7FC', borderRadius: 10, padding: 10, gap: 3 },
-  summaryNumber: { color: '#142034', fontSize: 18, fontWeight: '700' },
   officeToolbar: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   officeTabs: { flexDirection: 'row', borderRadius: 11, padding: 3, backgroundColor: '#ECF2FA' },
   officeTab: { flex: 1, alignItems: 'center', justifyContent: 'center', borderRadius: 9, paddingVertical: 11 },

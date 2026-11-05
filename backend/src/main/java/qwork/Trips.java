@@ -93,14 +93,14 @@ final class Trips {
         String purpose = field(body, "purpose", "Цель командировки", 1000, false);
         String start = plannedTime(body, "plannedStart", "Начало командировки");
         String end = plannedTime(body, "plannedEnd", "Окончание командировки");
+        long id = schedule(db, company, employee, number(user, "id"), destination, basis, purpose, start, end,
+            taskIds(body.get("taskIds"), false));
+        return report(db, user, id);
+    }
+
+    static long schedule(Connection db, long company, long employee, long actor, String destination, String basis,
+                         String purpose, String start, String end, List<Long> taskIds) throws SQLException {
         if (end.compareTo(start) <= 0) throw error(400, "Окончание командировки должно быть позже начала.");
-        if (!(body.get("taskIds") instanceof List<?> input) || input.isEmpty() || input.size() > 50) {
-            throw error(400, "Выберите от одной до 50 заявок сотрудника.");
-        }
-        var taskIds = new HashSet<Long>();
-        for (var item : input) {
-            if (!taskIds.add(identifier(item, "Заявка"))) throw error(400, "Одна заявка выбрана несколько раз.");
-        }
         lockEmployee(db, company, employee);
         if (Db.one(db, """
             SELECT id FROM work_trips WHERE company_id = ? AND employee_id = ? AND finished_at IS NULL
@@ -108,8 +108,49 @@ final class Trips {
             """, company, employee, end, start) != null) {
             throw error(409, "У сотрудника уже есть командировка на этот период.");
         }
-        var ordered = taskIds.stream().sorted().toList();
-        for (long taskId : ordered) {
+        validateTasks(db, company, employee, taskIds);
+        long id = Db.insert(db, """
+            INSERT INTO work_trips(company_id, employee_id, created_by, destination, basis, purpose,
+                planned_start, planned_end, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, company, employee, actor, destination, basis, purpose, start, end, now());
+        addTaskLinks(db, id, taskIds);
+        return id;
+    }
+
+    static Map<String, Object> attachTasks(Connection db, Map<String, Object> user, long id, Map<String, Object> body)
+            throws SQLException {
+        requireOffice(user);
+        long company = number(user, "company_id");
+        long employee = number(find(db, user, id), "employee_id");
+        lockEmployee(db, company, employee);
+        if (find(db, user, id).get("finished_at") != null) {
+            throw error(409, "Командировка уже завершена.");
+        }
+        var linked = new HashSet<Long>();
+        for (var row : Db.rows(db, "SELECT task_id FROM work_trip_tasks WHERE trip_id = ?", id)) {
+            linked.add(number(row, "task_id"));
+        }
+        var newIds = taskIds(body.get("taskIds"), false).stream().filter(taskId -> !linked.contains(taskId)).toList();
+        if (linked.size() + newIds.size() > 50) throw error(400, "К командировке можно привязать до 50 заявок.");
+        validateTasks(db, company, employee, newIds);
+        addTaskLinks(db, id, newIds);
+        return report(db, user, id);
+    }
+
+    static List<Long> taskIds(Object value, boolean optional) {
+        if (value == null && optional) return List.of();
+        if (!(value instanceof List<?> input) || (!optional && input.isEmpty()) || input.size() > 50) {
+            throw error(400, optional ? "Выберите до 50 заявок сотрудника." : "Выберите от одной до 50 заявок сотрудника.");
+        }
+        var ids = new HashSet<Long>();
+        for (var item : input) {
+            if (!ids.add(identifier(item, "Заявка"))) throw error(400, "Одна заявка выбрана несколько раз.");
+        }
+        return ids.stream().sorted().toList();
+    }
+
+    static void validateTasks(Connection db, long company, long employee, List<Long> taskIds) throws SQLException {
+        for (long taskId : taskIds) {
             Db.lockTask(db, company, taskId);
             var task = Db.one(db, """
                 SELECT status FROM tasks WHERE id = ? AND company_id = ? AND assignee_id = ?
@@ -121,14 +162,12 @@ final class Trips {
                 throw error(409, "Заявка уже связана с другой командировкой.");
             }
         }
-        long id = Db.insert(db, """
-            INSERT INTO work_trips(company_id, employee_id, created_by, destination, basis, purpose,
-                planned_start, planned_end, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, company, employee, number(user, "id"), destination, basis, purpose, start, end, now());
-        for (long taskId : ordered) {
+    }
+
+    private static void addTaskLinks(Connection db, long id, List<Long> taskIds) throws SQLException {
+        for (long taskId : taskIds) {
             Db.update(db, "INSERT INTO work_trip_tasks(trip_id, task_id) VALUES (?, ?)", id, taskId);
         }
-        return report(db, user, id);
     }
 
     static Map<String, Object> act(Connection db, Map<String, Object> user, long id, String action) throws SQLException {
@@ -227,11 +266,11 @@ final class Trips {
         return row;
     }
 
-    private static boolean isEmployee(Map<String, Object> user) {
+    static boolean isEmployee(Map<String, Object> user) {
         return "employee".equals(user.get("role"));
     }
 
-    private static String plannedTime(Map<String, Object> body, String key, String label) {
+    static String plannedTime(Map<String, Object> body, String key, String label) {
         try {
             return STAMP.format(OffsetDateTime.parse(field(body, key, label, 40, false)).toInstant());
         } catch (DateTimeParseException invalid) {
@@ -239,7 +278,7 @@ final class Trips {
         }
     }
 
-    private static String now() {
+    static String now() {
         return STAMP.format(Instant.now());
     }
 

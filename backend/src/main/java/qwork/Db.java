@@ -30,7 +30,7 @@ final class Db {
         "0001_initial.sql", "0002_media.sql", "0003_places.sql", "0004_sync.sql",
         "0005_shifts.sql", "0006_incidents.sql", "0007_planning.sql", "0008_auto_assignment.sql",
         "0009_xlsx_import.sql", "0010_departments.sql", "0011_login_registry.sql", "0012_optional_email.sql",
-        "0013_field_reports.sql", "0014_representative_reviews.sql", "0015_field_operations.sql"
+        "0013_field_reports.sql", "0014_representative_reviews.sql", "0015_field_operations.sql", "0016_trip_requests.sql"
     );
     private static final String SQLITE_SCHEMA = """
         CREATE TABLE IF NOT EXISTS companies (
@@ -161,7 +161,7 @@ final class Db {
                 for (String sql : (SQLITE_SCHEMA + Media.SQLITE_SCHEMA + Places.SQLITE_SCHEMA + Sync.SQLITE_SCHEMA
                         + Shift.SQLITE_SCHEMA + Incidents.SQLITE_SCHEMA + Planning.SQLITE_SCHEMA
                         + AutoAssignment.SQLITE_SCHEMA + XlsxImport.SQLITE_SCHEMA
-                        + RepresentativeReviews.SQLITE_SCHEMA + Trips.SQLITE_SCHEMA).split(";")) {
+                        + RepresentativeReviews.SQLITE_SCHEMA + Trips.SQLITE_SCHEMA + TripRequests.SQLITE_SCHEMA).split(";")) {
                     if (!sql.isBlank()) {
                         statement.execute(sql);
                     }

@@ -23,6 +23,7 @@ import QuickAccess, { clearQuickAccess, readQuickAccess } from './src/QuickAcces
 
 const STORAGE_KEY = 'qwork.tasks.v1';
 const INVITATION_KEY = 'qwork.company-link.v1';
+const QUICK_ACCESS_ONLINE_TIMEOUT_MS = 70000;
 
 async function locateArrival() {
   const permission = await Location.requestForegroundPermissionsAsync();
@@ -199,6 +200,7 @@ function Workspace() {
   const [savingTask, setSavingTask] = useState(false);
   const [showShifts, setShowShifts] = useState(false);
   const [page, setPage] = useState('home');
+  const [tripRoute, setTripRoute] = useState(null);
   const [navigationId, setNavigationId] = useState(0);
   const [offlineMode, setOfflineMode] = useState(false);
   const [offlineSnapshot, setOfflineSnapshot] = useState(null);
@@ -289,6 +291,7 @@ function Workspace() {
     if (selectedId === null && page === 'home') return;
     const back = BackHandler.addEventListener('hardwareBackPress', () => {
       if (selectedId !== null) setSelectedId(null);
+      else if (page === 'trips') navigate('shifts');
       else navigate('home');
       return true;
     });
@@ -454,17 +457,17 @@ function Workspace() {
   }
 
   async function unlock(nextSession) {
+    const employee = nextSession.user.role === 'employee';
+    const checkSession = timeout => apiRequest('/auth/me', { token: nextSession.token, timeout });
     try {
-      await apiRequest('/tasks', { token: nextSession.token, timeout: 4000 });
-    } catch (error) {
-      if (error.network && nextSession.user.role === 'employee') {
+      await checkSession(employee ? 4000 : QUICK_ACCESS_ONLINE_TIMEOUT_MS).catch(async error => {
+        if (!employee || !error.network) throw error;
         const store = await openOffline(nextSession);
-        if (Array.isArray(store.snapshot().tasks)) {
-          rememberCompany(nextSession);
-          enter(nextSession);
-          return;
+        if (!Array.isArray(store.snapshot().tasks)) {
+          await checkSession(QUICK_ACCESS_ONLINE_TIMEOUT_MS);
         }
-      }
+      });
+    } catch (error) {
       if (error.status !== 401) throw error;
       await clearQuickAccess().catch(() => {});
       setSavedQuickAccess(null);
@@ -499,6 +502,16 @@ function Workspace() {
       return rows.some(row => row.id === task.id)
         ? rows.map(row => row.id === task.id ? task : row)
         : [task, ...rows];
+    });
+  }
+
+  function addImportedTasks(imported) {
+    if (sessionRef.current !== session || !imported?.length) return;
+    revision.current += 1;
+    setServerTasks(previous => {
+      const rows = previous ?? [];
+      const existing = new Set(rows.map(row => row.id));
+      return [...imported.filter(row => !existing.has(row.id)).reverse(), ...rows];
     });
   }
 
@@ -653,6 +666,11 @@ function Workspace() {
     setSelectedId(id);
   }
 
+  function openEmployeeTrips(options) {
+    setTripRoute(options);
+    navigate('trips');
+  }
+
   const isEmployeeSession = session?.user.role === 'employee';
   const showOfflineIcon = offlineMode || Boolean(networkError);
   const tasks = isEmployeeSession ? offlineSnapshot?.tasks ?? null : session ? serverTasks : demoTasks;
@@ -762,12 +780,14 @@ function Workspace() {
                 <Pressable accessibilityRole="button" onPress={() => navigate('shifts')} style={styles.exit}>
                   <Text style={styles.exitText}>‹ К рабочему времени</Text>
                 </Pressable>
-                <EmployeeTrips request={request} offline={offlineMode || Boolean(networkError)} onTask={openEmployeeTask} />
+                <EmployeeTrips key={navigationId} request={request} offline={offlineMode || Boolean(networkError)}
+                  tasks={tasks ?? []} onTask={openEmployeeTask} initialView={tripRoute?.view}
+                  initialTripId={tripRoute?.tripId} initialRequestId={tripRoute?.requestId} />
               </ScrollView>
             ) : isEmployeeSession && showShifts ? (
               <EmployeeShiftPanel request={request} offline={offlineMode || Boolean(networkError)} onChange={refreshWork}
                 tasks={tasks ?? []} onUrgentLeave={enqueueUrgentLeave} onShifts={onShifts}
-                onTrips={() => navigate('trips')}
+                onTrips={openEmployeeTrips}
                 urgentLeavePending={Boolean(offlineSnapshot?.urgentLeavePending)} />
             ) : tasks === null && !networkError ? (
               <View style={styles.loading}><ActivityIndicator color="#245BE8" /></View>
@@ -801,6 +821,7 @@ function Workspace() {
                 onUploadPhoto={uploadPhoto}
                 onPhotoRejected={response => applyServerTask(response?.task)}
                 onCreateTask={fields => saveServerTask('POST', '/tasks', fields)}
+                onImportedTasks={addImportedTasks}
                 onUpdateTask={updateServerTask}
                 onCancelTask={(id, cancelReason) => updateServerTask(id, { status: 'cancelled', cancelReason })}
                 onRepeatTask={(id, fields = {}) => saveServerTask('POST', `/tasks/${encodeURIComponent(id)}/repeat`, fields)}

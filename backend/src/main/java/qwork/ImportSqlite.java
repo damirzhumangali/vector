@@ -21,7 +21,8 @@ final class ImportSqlite {
     private static final Set<String> OPTIONAL_TABLES = Set.of("work_sites", "task_events", "task_media", "sync_events",
         "shift_calendar", "shifts", "shift_task_actions", "unavailable_employees", "incidents", "incident_tasks",
         "work_plans", "planned_jobs", "assignment_settings", "planning_imports", "login_registry", "password_resets",
-        "field_work_defaults", "task_representative_reviews", "work_trips", "work_trip_tasks", "employee_work_modes");
+        "field_work_defaults", "task_representative_reviews", "work_trips", "work_trip_tasks", "employee_work_modes",
+        "work_trip_requests", "work_trip_request_tasks");
     private static final List<Table> TABLES = List.of(
         new Table("companies", "id code name", ""),
         new Table("users", "id company_id name login role is_owner password_hash password_salt",
@@ -43,6 +44,9 @@ final class ImportSqlite {
         new Table("work_trips", "id company_id employee_id created_by destination basis purpose planned_start planned_end created_at",
             "started_at finished_at"),
         new Table("work_trip_tasks", "trip_id task_id", ""),
+        new Table("work_trip_requests", "id company_id employee_id destination purpose planned_start planned_end status reason created_at",
+            "trip_id decided_at decided_by"),
+        new Table("work_trip_request_tasks", "request_id task_id", ""),
         new Table("employee_work_modes", "employee_id work_mode", ""),
         new Table("sync_events",
             "company_id event_id task_id actor_id kind expected_revision payload_hash occurred_at received_at "

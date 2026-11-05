@@ -11,6 +11,8 @@ import java.sql.Connection;
 import java.sql.SQLException;
 import java.time.LocalDate;
 import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
+import java.time.format.ResolverStyle;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
@@ -42,10 +44,18 @@ final class XlsxImport {
         """;
     private static final int MAX_EXPANDED_BYTES = 12 * 1024 * 1024;
     private static final int MAX_ROWS = 200;
-    private static final List<String> REQUIRED = List.of("title", "objectId", "startDate", "time");
+    private static final List<String> REQUIRED = List.of("title", "startDate", "time");
+    private static final DateTimeFormatter LOCAL_DATE = DateTimeFormatter.ofPattern("d.M.uuuu")
+        .withResolverStyle(ResolverStyle.STRICT);
+    private static final DateTimeFormatter LOCAL_TIME = DateTimeFormatter.ofPattern("H:mm")
+        .withResolverStyle(ResolverStyle.STRICT);
     private static final Map<String, String> HEADERS = Map.ofEntries(
         Map.entry("title", "title"), Map.entry("название", "title"),
+        Map.entry("название заявки", "title"),
         Map.entry("objectid", "objectId"), Map.entry("id объекта", "objectId"),
+        Map.entry("object", "objectName"), Map.entry("объект", "objectName"),
+        Map.entry("название объекта", "objectName"),
+        Map.entry("assigneelogin", "assigneeLogin"), Map.entry("логин исполнителя", "assigneeLogin"),
         Map.entry("startdate", "startDate"), Map.entry("дата", "startDate"),
         Map.entry("time", "time"), Map.entry("время", "time"),
         Map.entry("description", "description"), Map.entry("описание", "description"),
@@ -60,8 +70,13 @@ final class XlsxImport {
     private XlsxImport() {}
 
     static Map<String, Object> process(Connection db, Map<String, Object> user, Map<String, Object> payload,
-                                       boolean apply) throws SQLException {
+                                       boolean apply) throws Exception {
         Accounts.requireDispatcher(user);
+        Object mode = payload.getOrDefault("mode", "planning");
+        if (!"planning".equals(mode) && !"tasks".equals(mode)) {
+            throw Domain.error(400, "Выберите режим импорта Excel.");
+        }
+        boolean direct = "tasks".equals(mode);
         if (!(payload.get("base64") instanceof String encoded) || encoded.length() > ((MAX_BYTES + 2) / 3) * 4) {
             throw Domain.error(400, "Прикрепите файл Excel .xlsx размером до 2 МБ.");
         }
@@ -78,18 +93,22 @@ final class XlsxImport {
         var known = new HashSet<String>();
         sheet.rows().getFirst().cells().forEach((column, cell) -> {
             String field = HEADERS.get(cell.text().strip().toLowerCase(Locale.ROOT));
+            if (!direct && ("objectName".equals(field) || "assigneeLogin".equals(field))) return;
             if (field != null) {
                 if (!known.add(field)) throw Domain.error(400, "Заголовок повторяется: " + field);
                 columns.put(column, field);
             }
         });
-        if (!known.containsAll(REQUIRED)) {
-            throw Domain.error(400, "На первом листе нужны столбцы: Название, ID объекта, Дата, Время.");
+        if (!known.containsAll(REQUIRED) || !(known.contains("objectId") || direct && known.contains("objectName"))) {
+            throw Domain.error(400, direct
+                ? "На первом листе нужны столбцы «Название», «Объект» или «ID объекта», «Дата» и «Время»."
+                : "На первом листе нужны столбцы «Название», «ID объекта», «Дата» и «Время».");
         }
 
         long company = Domain.number(user, "company_id");
         if (apply) Planning.lockCompany(db, company);
         var results = new ArrayList<Map<String, Object>>();
+        var tasks = new ArrayList<Object>();
         var seen = new HashSet<String>();
         int imported = 0;
         for (var row : sheet.rows().subList(1, sheet.rows().size())) {
@@ -109,7 +128,7 @@ final class XlsxImport {
                     if (cell.formula()) throw Domain.error(400, "Замените формулы в этой строке значениями.");
                     if (!cell.text().isBlank()) {
                         String field = column.getValue();
-                        Object value = convert(field, cell, sheet.dates1904());
+                        Object value = convert(field, cell, sheet.dates1904(), direct);
                         fields.put(field, value);
                         result.put(field, value);
                     }
@@ -120,8 +139,11 @@ final class XlsxImport {
             }
 
             Map<String, Object> normalized;
+            String assigneeId = null;
             try {
+                if (direct) resolveObject(db, user, fields, result);
                 normalized = Planning.validate(db, user, fields);
+                if (direct) assigneeId = resolveAssignee(db, company, fields, result, apply);
             } catch (Domain.Failure error) {
                 result.put("error", error.getMessage());
                 continue;
@@ -134,7 +156,13 @@ final class XlsxImport {
                     ON CONFLICT (company_id, fingerprint) DO NOTHING
                     """, company, fingerprint) == 0;
                 if (!duplicate) {
-                    Planning.save(db, user, null, fields);
+                    if (direct) {
+                        var task = Planning.createImportedTask(db, user, normalized, assigneeId).get("task");
+                        tasks.add(task);
+                        result.put("taskId", ((Map<?, ?>) task).get("id"));
+                    } else {
+                        Planning.save(db, user, null, fields);
+                    }
                     imported++;
                 }
             } else if (!duplicate) {
@@ -144,23 +172,66 @@ final class XlsxImport {
             }
             result.put("duplicate", duplicate);
         }
-        return Map.of("rows", results, "imported", imported);
+        return direct ? Map.of("rows", results, "imported", imported, "mode", "tasks", "tasks", tasks)
+            : Map.of("rows", results, "imported", imported);
     }
 
-    private static Object convert(String field, Cell cell, boolean dates1904) {
+    private static void resolveObject(Connection db, Map<String, Object> user, Map<String, Object> fields,
+                                      Map<String, Object> result) throws SQLException {
+        String name = Domain.field(fields, "objectName", "Название объекта", 160, true);
+        if (!fields.containsKey("objectId")) {
+            if (name.isEmpty()) throw Domain.error(400, "Укажите объект из справочника или его ID.");
+            var matches = Db.rows(db, """
+                SELECT id FROM work_sites WHERE company_id = ? AND name = ? ORDER BY id LIMIT 2
+                """, Domain.number(user, "company_id"), name);
+            if (matches.isEmpty()) throw Domain.error(400, "Объект с таким названием не найден в справочнике.");
+            if (matches.size() > 1) throw Domain.error(400, "В справочнике несколько таких объектов. Укажите ID объекта.");
+            fields.put("objectId", matches.getFirst().get("id").toString());
+        }
+        var object = Places.resolve(db, user, fields);
+        if (!name.isEmpty() && !name.equals(object.name())) {
+            throw Domain.error(400, "Название объекта не соответствует указанному ID.");
+        }
+        result.put("objectId", object.objectId().toString());
+        result.put("objectName", object.name());
+    }
+
+    private static String resolveAssignee(Connection db, long company, Map<String, Object> fields,
+                                          Map<String, Object> result, boolean apply) throws SQLException {
+        String login = Domain.field(fields, "assigneeLogin", "Логин исполнителя", 40, true).toLowerCase(Locale.ROOT);
+        if (login.isEmpty()) return null;
+        var worker = Db.one(db, """
+            SELECT id, name FROM users WHERE company_id = ? AND role = 'employee' AND login = ?
+            """, company, login);
+        if (worker == null) throw Domain.error(400, "Сотрудник с таким логином не найден в компании.");
+        long id = Domain.number(worker, "id");
+        if (apply) {
+            Shift.requireAvailable(db, company, id);
+        } else if (!Shift.isAvailable(db, company, id)) {
+            throw Domain.error(409, "Сотрудник недоступен для новых назначений.");
+        }
+        result.put("assigneeLogin", login);
+        result.put("assigneeName", worker.get("name"));
+        return Long.toString(id);
+    }
+
+    private static Object convert(String field, Cell cell, boolean dates1904, boolean direct) {
         String value = cell.text().strip();
         try {
             return switch (field) {
                 case "startDate" -> cell.numeric()
-                    ? excelDate(decimal(value).longValueExact(), dates1904).toString() : value;
-                case "time" -> cell.numeric() ? excelTime(decimal(value)) : value;
+                    ? excelDate(decimal(value).longValueExact(), dates1904).toString()
+                    : direct && value.contains(".") ? LocalDate.parse(value, LOCAL_DATE).toString() : value;
+                case "time" -> cell.numeric() ? excelTime(decimal(value))
+                    : direct ? LocalTime.parse(value, LOCAL_TIME).toString() : value;
                 case "objectId" -> Long.toString(decimal(value).longValueExact());
                 case "priority", "durationMinutes" -> decimal(value).intValueExact();
                 default -> value;
             };
         } catch (RuntimeException error) {
             throw Domain.error(400, switch (field) {
-                case "startDate" -> "Укажите дату в формате ГГГГ-ММ-ДД.";
+                case "startDate" -> direct ? "Укажите дату в формате ДД.ММ.ГГГГ или ГГГГ-ММ-ДД."
+                    : "Укажите дату в формате ГГГГ-ММ-ДД.";
                 case "time" -> "Укажите время в формате ЧЧ:ММ.";
                 case "objectId" -> "Укажите числовой ID объекта.";
                 case "priority" -> "Приоритет должен быть целым числом.";

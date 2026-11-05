@@ -60,6 +60,8 @@ final class Main {
     private static final Pattern TASK_TRANSFER = Pattern.compile("/tasks/([0-9]{1,19})/transfer");
     private static final Pattern PLANNING_TEMPLATE = Pattern.compile("/planning/templates/([0-9]{1,19})");
     private static final Pattern TRIP_ACTION = Pattern.compile("/trips/([0-9]{1,19})/(start|finish|report)");
+    private static final Pattern TRIP_TASKS = Pattern.compile("/trips/([0-9]{1,19})/tasks");
+    private static final Pattern TRIP_REQUEST_DECISION = Pattern.compile("/trip-requests/([0-9]{1,19})/decision");
 
     private record Attempts(long start, int count) {}
     private record Result(int status, Map<String, Object> body, byte[] image) {
@@ -260,7 +262,7 @@ final class Main {
             case "POST /employees", "POST /objects", "POST /shifts",
                  "POST /shifts/calendar", "POST /incidents", "POST /planning/templates",
                  "POST /planning/assignment-settings", "POST /field-work/defaults", "POST /trips",
-                 "POST /field-control/work-mode" -> payload(exchange);
+                 "POST /field-control/work-mode", "POST /trip-requests" -> payload(exchange);
             case "POST /planning/import", "POST /planning/import/preview" -> payload(exchange, MAX_IMPORT_BODY);
             case "POST /sync/events" -> payload(exchange, MAX_PHOTO_BODY);
             default -> {
@@ -274,7 +276,8 @@ final class Main {
                             || EMPLOYEE_DEPARTMENT.matcher(path).matches()))
                         || ("POST".equals(method) && (REPEAT.matcher(path).matches() || PHOTO_REJECT.matcher(path).matches()
                             || SHIFT_ACTION.matcher(path).matches() || INCIDENT_ACTION.matcher(path).matches()
-                            || TASK_TRANSFER.matcher(path).matches() || EMPLOYEE_PASSWORD.matcher(path).matches()))) {
+                            || TASK_TRANSFER.matcher(path).matches() || EMPLOYEE_PASSWORD.matcher(path).matches()
+                            || TRIP_TASKS.matcher(path).matches() || TRIP_REQUEST_DECISION.matcher(path).matches()))) {
                     yield payload(exchange);
                 }
                 yield Map.<String, Object>of();
@@ -369,6 +372,8 @@ final class Main {
             case "POST /field-work/defaults": return ok(FieldWork.saveDefault(db, user, payload));
             case "GET /trips": return ok(Trips.list(db, user));
             case "POST /trips": return created(Trips.create(db, user, payload));
+            case "GET /trip-requests": return ok(TripRequests.list(db, user));
+            case "POST /trip-requests": return created(TripRequests.create(db, user, payload));
             case "GET /field-control": return ok(FieldControl.dashboard(db, user));
             case "POST /field-control/work-mode": return ok(FieldControl.setWorkMode(db, user, payload));
             case "POST /sync/events": return ok(Sync.apply(db, user, payload));
@@ -402,6 +407,14 @@ final class Main {
             String action = trip.group(2);
             if ("GET".equals(method) && "report".equals(action)) return ok(Trips.report(db, user, tripId));
             if ("POST".equals(method) && !"report".equals(action)) return ok(Trips.act(db, user, tripId, action));
+        }
+        var tripTasks = TRIP_TASKS.matcher(path);
+        if ("POST".equals(method) && tripTasks.matches()) {
+            return ok(Trips.attachTasks(db, user, id(tripTasks.group(1)), payload));
+        }
+        var tripRequest = TRIP_REQUEST_DECISION.matcher(path);
+        if ("POST".equals(method) && tripRequest.matches()) {
+            return ok(TripRequests.decide(db, user, id(tripRequest.group(1)), payload));
         }
         var representative = REPRESENTATIVE.matcher(path);
         if (representative.matches()) {
@@ -583,6 +596,11 @@ final class Main {
             return;
         }
         exchange.sendResponseHeaders(status, data.length);
-        exchange.getResponseBody().write(data);
+        // HttpServer copies each write into its own buffer on Java 21.
+        var output = exchange.getResponseBody();
+        int chunkSize = 64 * 1024;
+        for (int offset = 0; offset < data.length; offset += chunkSize) {
+            output.write(data, offset, Math.min(chunkSize, data.length - offset));
+        }
     }
 }

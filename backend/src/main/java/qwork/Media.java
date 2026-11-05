@@ -44,7 +44,7 @@ final class Media {
     private static final String BIT_DEPTH_ERROR = "Для конвертации без потерь нужен снимок с глубиной цвета до 8 бит на канал.";
     private static final int MAX_PHOTOS = 64;
     private static final int MAX_SUPPLEMENTAL_PHOTOS = 32;
-    private static final Semaphore IMAGE_SLOTS = new Semaphore(2);
+    private static final Semaphore IMAGE_SLOTS = new Semaphore(1);
     private static final Set<String> KINDS = Set.of("material", "before", "after", "checklist");
     private static final Set<String> CLOSED = Set.of("done", "cancelled", "repeated");
     private static final String COLUMNS = """
@@ -68,6 +68,7 @@ final class Media {
     static final String SQLITE_SCHEMA = SQLITE_CREATE_TABLE + ";";
 
     private record Position(Double latitude, Double longitude, Double accuracy) {}
+    private record DecodedPicture(BufferedImage image, int orientation) {}
     private record Picture(byte[] original, byte[] display, int width, int height) {}
 
     private Media() {}
@@ -175,34 +176,33 @@ final class Media {
         if (proof && hasAccepted(db, taskId, kind, pairKey)) {
             throw error(409, "Фото этого вида уже прикреплено к паре.");
         }
-        byte[] input = decode(payload.get("imageBase64"));
         if (!IMAGE_SLOTS.tryAcquire()) {
             throw error(429, "Сервер обрабатывает другие фотографии. Попробуйте ещё раз.");
         }
-        Picture photo;
         try {
-            photo = process(input, material, name, capturedAt, position, true);
+            var image = readOrientedImage(payload, MAX_IMAGE_BYTES, material);
+            var photo = process(image, material, name, capturedAt, position, true);
+            long id = Db.insert(db, """
+                INSERT INTO task_media(task_id, author_id, author_name, kind, caption, created_at, captured_at,
+                    latitude, longitude, accuracy, sha256, width, height, original_image, display_image, pair_key, checklist_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, taskId, number(user, "id"), name, kind, caption, now.toString(), capturedAt,
+                position.latitude(), position.longitude(), position.accuracy(), sha256(photo.original()),
+                photo.width(), photo.height(), photo.original(), photo.display(), pairKey, checklistId);
+            if (!material) {
+                if (proof && FieldWork.MAIN_PAIR.equals(pairKey)) {
+                    // Keep the original task response counters compatible with older clients.
+                    String column = kind.equals("before") ? "photo_before" : "photo_after";
+                    Db.update(db, "UPDATE tasks SET " + column + " = 1, revision = revision + 1 WHERE id = ?", taskId);
+                } else {
+                    Db.update(db, "UPDATE tasks SET revision = revision + 1 WHERE id = ?", taskId);
+                }
+            }
+            return Map.of("photo", metadata(Db.one(db, "SELECT " + COLUMNS + " FROM task_media WHERE id = ?", id),
+                task.get("location")));
         } finally {
             IMAGE_SLOTS.release();
         }
-        long id = Db.insert(db, """
-            INSERT INTO task_media(task_id, author_id, author_name, kind, caption, created_at, captured_at,
-                latitude, longitude, accuracy, sha256, width, height, original_image, display_image, pair_key, checklist_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, taskId, number(user, "id"), name, kind, caption, now.toString(), capturedAt,
-            position.latitude(), position.longitude(), position.accuracy(), sha256(photo.original()),
-            photo.width(), photo.height(), photo.original(), photo.display(), pairKey, checklistId);
-        if (!material) {
-            if (proof && FieldWork.MAIN_PAIR.equals(pairKey)) {
-                // Keep the original task response counters compatible with older clients.
-                String column = kind.equals("before") ? "photo_before" : "photo_after";
-                Db.update(db, "UPDATE tasks SET " + column + " = 1, revision = revision + 1 WHERE id = ?", taskId);
-            } else {
-                Db.update(db, "UPDATE tasks SET revision = revision + 1 WHERE id = ?", taskId);
-            }
-        }
-        return Map.of("photo", metadata(Db.one(db, "SELECT " + COLUMNS + " FROM task_media WHERE id = ?", id),
-            task.get("location")));
     }
 
     static byte[] read(Connection db, Map<String, Object> user, long taskId, long photoId,
@@ -351,10 +351,6 @@ final class Media {
         throw error(400, "Некорректное время съёмки.");
     }
 
-    private static byte[] decode(Object value) {
-        return decode(value, MAX_IMAGE_BYTES);
-    }
-
     private static byte[] decode(Object value, int maxBytes) {
         String limit = maxBytes / (1024 * 1024) + " МБ.";
         if (!(value instanceof String base64) || base64.length() > ((maxBytes + 2) / 3) * 4) {
@@ -402,12 +398,12 @@ final class Media {
     }
 
     static byte[] representativePhoto(Map<String, Object> payload) {
-        byte[] input = decode(payload.get("imageBase64"), MAX_REPRESENTATIVE_IMAGE_BYTES);
         if (!IMAGE_SLOTS.tryAcquire()) {
             throw error(429, "Сервер обрабатывает другие фотографии. Попробуйте ещё раз.");
         }
         try {
-            byte[] display = process(input, true, "", "", null, false).display();
+            var image = readOrientedImage(payload, MAX_REPRESENTATIVE_IMAGE_BYTES, true);
+            byte[] display = process(image, true, "", "", null, false).display();
             if (display.length > MAX_REPRESENTATIVE_IMAGE_BYTES) {
                 throw error(400, "Фотография слишком большая. Снимите её с меньшим разрешением.");
             }
@@ -417,8 +413,30 @@ final class Media {
         }
     }
 
-    private static Picture process(byte[] input, boolean material, String author, String capturedAt, Position position,
+    private static Picture process(BufferedImage image, boolean material, String author, String capturedAt, Position position,
                                    boolean keepOriginal) {
+        try {
+            if (!material) validateQuality(image);
+            byte[] display = material ? jpeg(image) : watermarked(image, author, capturedAt, position);
+            byte[] original = keepOriginal ? LosslessWebp.encode(image) : null;
+            return new Picture(original, display, image.getWidth(), image.getHeight());
+        } catch (IOException e) {
+            throw error(400, "Не удалось обработать фотографию. Снимите её ещё раз.");
+        } finally {
+            image.flush();
+        }
+    }
+
+    private static BufferedImage readOrientedImage(Map<String, Object> payload, int maxBytes, boolean material) {
+        // The request no longer needs the Base64 string after decoding the image.
+        var source = readImage(decode(payload.remove("imageBase64"), maxBytes), material);
+        var image = JpegOrientation.normalize(source.image(), source.orientation());
+        if (image != source.image()) source.image().flush();
+        return image;
+    }
+
+    private static DecodedPicture readImage(byte[] input, boolean material) {
+        BufferedImage decoded;
         try (var stream = new MemoryCacheImageInputStream(new ByteArrayInputStream(input))) {
             var readers = ImageIO.getImageReaders(stream);
             if (!readers.hasNext()) {
@@ -436,33 +454,17 @@ final class Media {
                 if (!material && (Math.min(width, height) < 480 || Math.max(width, height) < 640)) {
                     throw error(400, "Фото слишком маленькое. Снимите его ещё раз.");
                 }
-                BufferedImage decoded = reader.read(0);
-                BufferedImage image = decoded;
-                try {
-                    for (int bits : decoded.getColorModel().getComponentSize()) {
-                        if (bits > 8) {
-                            throw error(400, BIT_DEPTH_ERROR);
-                        }
-                    }
-                    image = JpegOrientation.normalize(decoded, input);
-                    if (!material) {
-                        validateQuality(image);
-                    }
-                    byte[] original = keepOriginal ? LosslessWebp.encode(image) : null;
-                    byte[] display = material ? jpeg(image) : watermarked(image, author, capturedAt, position);
-                    return new Picture(original, display, image.getWidth(), image.getHeight());
-                } finally {
-                    if (image != decoded) {
-                        image.flush();
-                    }
-                    decoded.flush();
-                }
+                decoded = reader.read(0);
             } finally {
                 reader.dispose();
             }
         } catch (IOException e) {
             throw error(400, "Не удалось обработать фотографию. Снимите её ещё раз.");
         }
+        for (int bits : decoded.getColorModel().getComponentSize()) {
+            if (bits > 8) throw error(400, BIT_DEPTH_ERROR);
+        }
+        return new DecodedPicture(decoded, JpegOrientation.orientation(input));
     }
 
     private static void validateQuality(BufferedImage image) {

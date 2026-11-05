@@ -31,13 +31,15 @@ final class FieldWork {
 
     static void initSqlite(Connection db) throws SQLException {
         var taskColumns = Db.rows(db, "PRAGMA table_info(tasks)").stream().map(row -> row.get("name")).toList();
-        for (var column : Map.of(
-            "purpose", "TEXT NOT NULL DEFAULT ''", "priority", "INTEGER NOT NULL DEFAULT 2 CHECK (priority BETWEEN 1 AND 3)",
-            "manager_id", "INTEGER REFERENCES users(id)", "checklist", "TEXT", "outcome", "TEXT",
-            "photo_pairs", "TEXT", "repeat_reason", "TEXT NOT NULL DEFAULT ''"
-        ).entrySet()) {
-            if (!taskColumns.contains(column.getKey())) {
-                Db.update(db, "ALTER TABLE tasks ADD COLUMN " + column.getKey() + " " + column.getValue());
+        try (var statement = db.createStatement()) {
+            for (var column : Map.of(
+                "purpose", "TEXT NOT NULL DEFAULT ''", "priority", "INTEGER NOT NULL DEFAULT 2 CHECK (priority BETWEEN 1 AND 3)",
+                "manager_id", "INTEGER REFERENCES users(id)", "checklist", "TEXT", "outcome", "TEXT",
+                "photo_pairs", "TEXT", "repeat_reason", "TEXT NOT NULL DEFAULT ''"
+            ).entrySet()) {
+                if (!taskColumns.contains(column.getKey())) {
+                    statement.execute("ALTER TABLE tasks ADD COLUMN " + column.getKey() + " " + column.getValue());
+                }
             }
         }
         Db.update(db, """

@@ -377,7 +377,7 @@ function TaskForm({ onCreate, onCancel, employees, objects, onCreateObject, requ
         <Text style={styles.label}>Цель выезда</Text>
         <TextInput accessibilityLabel="Цель выезда" value={purpose} onChangeText={setPurpose}
           style={styles.input} placeholder="Например, подтвердить исправность освещения" placeholderTextColor="#64718A"
-          editable={!busy} maxLength={500} />
+          editable={!busy} maxLength={1000} />
         <Text style={styles.label}>Приоритет</Text>
         {[1, 2, 3].map(value => (
           <Choice key={value} selected={priority === value} onPress={() => { if (!busy) setPriority(value); }}>
@@ -1322,7 +1322,7 @@ export default function OfficeScreens({
                 <View style={styles.card}>
                   <Text accessibilityRole="header" style={styles.cardTitle}>Фотоотчёт сотрудника</Text>
                   <TaskPhotoGallery taskId={selected.id} request={request} imageSource={imageSource}
-                    kinds={REPORT_KINDS} revision={selected.revision} checklist={selected.checklist}
+                    kinds={REPORT_KINDS} revision={selected.revision} checklist={selected.checklist} photoPairs={selected.photoPairs}
                     canReject={canReview && selected.status === 'review' && !busy}
                     onRejected={onPhotoRejected} />
                 </View>

@@ -9,8 +9,8 @@ export const PRIORITY_LABELS = { 1: 'Низкий', 2: 'Обычный', 3: 'В�
 export const CHECKLIST_OUTCOMES = {
   done: 'Выполнено',
   not_done: 'Не выполнено',
-  problem: 'Обнаружена проблема',
-  follow_up: 'Нужна доработка',
+  problem: 'Выявлена проблема',
+  follow_up: 'Требуется дополнительная работа',
 };
 
 export const RESULT_FIELDS = [
@@ -64,7 +64,7 @@ export default function FieldReport({
 }) {
   const events = task.history ?? [];
   const start = events.find(event => event.status === 'work');
-  const finish = events.findLast(event => event.status === 'review');
+  const finish = events.filter(event => event.status === 'review').pop();
   const checklist = task.checklist ?? DEFAULT_CHECKLIST_TITLES.map((title, index) => ({
     id: String(index), title, status: task.checks?.[index] ? 'done' : null,
   }));
@@ -110,7 +110,7 @@ export default function FieldReport({
             <View style={styles.card}>
               <Text accessibilityRole="header" style={styles.label}>Сравнение «До / После»</Text>
               <TaskPhotoGallery taskId={task.id} request={request} imageSource={imageSource}
-                kinds={REPORT_KINDS} comparisonPairs={pairs} location={task.address || task.object}
+                kinds={REPORT_KINDS} photoPairs={pairs} compare location={task.address || task.object}
                 checklist={checklist} revision={revision ?? task.revision}
                 canReject={canReject} onRejected={onRejected} />
             </View>

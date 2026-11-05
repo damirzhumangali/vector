@@ -16,10 +16,6 @@ mkdir "$test_dir/classes"
 
 # Compile changed application classes first so a pre-existing jar cannot mask stale source.
 javac --release 21 -encoding UTF-8 -cp "$dependency_jar" -d "$test_dir/classes" \
-    "$backend_dir/src/main/java/qwork/Accounts.java" \
-    "$backend_dir/src/main/java/qwork/Tasks.java" \
-    "$backend_dir/src/main/java/qwork/JpegOrientation.java" \
-    "$backend_dir/src/main/java/qwork/LosslessWebp.java" \
-    "$backend_dir/src/main/java/qwork/Media.java" \
+    "$backend_dir"/src/main/java/qwork/*.java \
     "$backend_dir/tests/qwork/DispatcherReviewCheck.java"
 java -ea -Djava.awt.headless=true -cp "$test_dir/classes:$dependency_jar" qwork.DispatcherReviewCheck

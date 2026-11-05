@@ -42,7 +42,8 @@ final class Media {
     private static final int MAX_IMAGE_EDGE = 16_383;
     private static final byte[] PNG_SIGNATURE = {(byte) 0x89, 'P', 'N', 'G', 13, 10, 26, 10};
     private static final String BIT_DEPTH_ERROR = "Для конвертации без потерь нужен снимок с глубиной цвета до 8 бит на канал.";
-    private static final int MAX_PHOTOS = 32;
+    private static final int MAX_PHOTOS = 64;
+    private static final int MAX_SUPPLEMENTAL_PHOTOS = 32;
     private static final Semaphore IMAGE_SLOTS = new Semaphore(2);
     private static final Set<String> KINDS = Set.of("material", "before", "after", "checklist");
     private static final Set<String> CLOSED = Set.of("done", "cancelled", "repeated");
@@ -165,6 +166,11 @@ final class Media {
         long count = number(Db.one(db, "SELECT COUNT(*) AS total FROM task_media WHERE task_id = ?", taskId), "total");
         if (count >= MAX_PHOTOS) {
             throw error(409, "В заявке достигнут предел количества фотографий.");
+        }
+        if (!proof && number(Db.one(db, """
+            SELECT COUNT(*) AS total FROM task_media WHERE task_id = ? AND kind IN ('material', 'checklist')
+            """, taskId), "total") >= MAX_SUPPLEMENTAL_PHOTOS) {
+            throw error(409, "В заявке достигнут предел количества материалов и фото чек-листа.");
         }
         if (proof && hasAccepted(db, taskId, kind, pairKey)) {
             throw error(409, "Фото этого вида уже прикреплено к паре.");

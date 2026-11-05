@@ -139,7 +139,7 @@ final class FieldControl {
             row.put("tripId", Objects.toString(task.get("trip_id"), null));
             row.put("lastEvent", history.last == null ? null : history.last.json());
             row.put("representativeStatus", pending ? "pending" : decision);
-            row.put("alerts", alerts);
+            row.put("alerts", List.copyOf(alerts));
             board.add(row);
         }
         return Map.of("employees", employees.stream().map(row -> people.get(number(row, "id")).json()).toList(),

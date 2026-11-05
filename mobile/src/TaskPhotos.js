@@ -355,11 +355,12 @@ function PhotoMetadata({ photo, location }) {
   return (
     <>
       {date && Number.isFinite(date.getTime()) && <Text style={styles.muted}>{date.toLocaleString('ru-RU')}</Text>}
-      {location ? <Text style={styles.muted}>{location}</Text> : null}
+      {location ? <Text style={styles.muted}>Объект · {location}</Text> : null}
       <Text style={styles.muted}>
         {hasPosition ? `${photo.latitude.toFixed(5)}, ${photo.longitude.toFixed(5)}` : 'Без координат GPS'}
       </Text>
       {Number.isFinite(photo.accuracy) ? <Text style={styles.muted}>Точность GPS · ±{Math.round(photo.accuracy)} м</Text> : null}
+      {Number.isFinite(photo.distanceToObject) ? <Text style={styles.muted}>До объекта · {photo.distanceToObject} м</Text> : null}
       {geofence && geofence !== 'unavailable' ? (
         <Text style={photo.geofenceStatus === 'outside' ? styles.error : styles.muted}>{geofence}</Text>
       ) : null}
@@ -367,7 +368,7 @@ function PhotoMetadata({ photo, location }) {
   );
 }
 
-function GalleryPhoto({ photo, path, imageSource, onReject, rejectDisabled, comparison = false, location, checklistTitle }) {
+function GalleryPhoto({ photo, path, imageSource, onReject, rejectDisabled, comparison = false, location, contextLabel }) {
   const [show, setShow] = useState(comparison);
   const [imageError, setImageError] = useState(false);
   const [reason, setReason] = useState(null);
@@ -401,7 +402,7 @@ function GalleryPhoto({ photo, path, imageSource, onReject, rejectDisabled, comp
         {photo.pending ? <Icon name="clock" color="#F3A227" size={17} /> : rejected ? <Icon name="alert" color="#ED5267" size={17} /> : <Icon name="check" color="#21B885" size={17} />}
       </View>
       {photo.caption ? <Text style={styles.muted}>{photo.caption}</Text> : null}
-      {checklistTitle ? <Text style={styles.muted}>{checklistTitle}</Text> : null}
+      {contextLabel ? <Text style={styles.muted}>{contextLabel}</Text> : null}
       {photo.authorName ? <Text style={styles.muted}>{photo.authorName}</Text> : null}
       {rejected && <Text style={styles.error}>Отклонено{photo.rejectedReason ? ' · ' + photo.rejectedReason : ''}</Text>}
       {show && !imageError ? (
@@ -443,8 +444,8 @@ function GalleryPhoto({ photo, path, imageSource, onReject, rejectDisabled, comp
 }
 
 export function TaskPhotoGallery({
-  taskId, request, imageSource, kinds, canReject = false, onRejected, revision, comparisonPairs,
-  location, checklist = [],
+  taskId, request, imageSource, kinds, canReject = false, onRejected, revision,
+  photoPairs = [], compare = false, location, checklist = [],
 }) {
   const requestRef = useRef(request);
   const pendingRejection = useRef(false);
@@ -496,7 +497,8 @@ export function TaskPhotoGallery({
       rejectDisabled={rejecting}
       comparison={comparison}
       location={location}
-      checklistTitle={checklist.find(item => item.id === photo.checklistId)?.title}
+      contextLabel={photo.kind === 'checklist' ? checklist.find(item => item.id === photo.checklistId)?.title
+        : !comparison ? photoPairs.find(pair => pair.key === (photo.pairKey ?? 'main'))?.label : undefined}
     />
   );
   return (
@@ -506,8 +508,8 @@ export function TaskPhotoGallery({
           <ErrorMessage message={state.error} />
           <PhotoButton onPress={() => setVersion(value => value + 1)} secondary>Повторить загрузку</PhotoButton>
         </>
-      ) : photos.length === 0 && !comparisonPairs ? <Text style={styles.muted}>Фотографий пока нет.</Text> : null}
-      {comparisonPairs?.map(pair => (
+      ) : photos.length === 0 && !compare ? <Text style={styles.muted}>Фотографий пока нет.</Text> : null}
+      {compare && photoPairs.map(pair => (
         <View key={pair.key} style={styles.group}>
           <Text accessibilityRole="header" style={styles.photoTitle}>{pair.label}</Text>
           <View style={styles.comparisonRow}>
@@ -523,7 +525,7 @@ export function TaskPhotoGallery({
           </View>
         </View>
       ))}
-      {photos.filter(photo => !comparisonPairs || !activeProof(photo)).map(photo => renderPhoto(photo))}
+      {photos.filter(photo => !compare || !activeProof(photo)).map(photo => renderPhoto(photo))}
     </View>
   );
 }

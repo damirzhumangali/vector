@@ -466,7 +466,7 @@ function Workspace() {
         }
       }
       if (error.status !== 401) throw error;
-      await clearQuickAccess();
+      await clearQuickAccess().catch(() => {});
       setSavedQuickAccess(null);
       Alert.alert('Сеанс завершён', 'Войдите с логином и паролем.');
       return;

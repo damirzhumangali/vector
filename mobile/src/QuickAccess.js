@@ -10,7 +10,7 @@ import { Icon } from './ui';
 const ACCESS_KEY = 'qwork.quick-access.v1';
 const BIOMETRIC_KEY = 'qwork.biometric-session.v1';
 const MAX_ATTEMPTS = 5;
-const iosExpoGo = Platform.OS === 'ios' && (Constants.appOwnership === 'expo' || Constants.expoGoConfig != null);
+const iosExpoGo = Platform.OS === 'ios' && (Constants.executionEnvironment === 'storeClient' || Constants.appOwnership === 'expo');
 const storageOptions = { keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY };
 const biometricOptions = {
   ...storageOptions,
@@ -36,8 +36,14 @@ export async function readQuickAccess() {
 }
 
 export async function clearQuickAccess() {
-  await SecureStore.deleteItemAsync(ACCESS_KEY, storageOptions);
-  if (!iosExpoGo) await SecureStore.deleteItemAsync(BIOMETRIC_KEY, biometricOptions);
+  const previous = await readRecord();
+  if (!previous) return;
+  // On iOS, overwrite the session without invoking the Keychain's delete path.
+  if (Platform.OS === 'ios') await saveRecord(null);
+  else await SecureStore.deleteItemAsync(ACCESS_KEY, storageOptions);
+  if (previous.method === 'biometric' && !iosExpoGo) {
+    await SecureStore.deleteItemAsync(BIOMETRIC_KEY, biometricOptions);
+  }
 }
 
 function saveRecord(record) {
@@ -46,6 +52,14 @@ function saveRecord(record) {
 
 function pinDigest(pin, salt) {
   return Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, `${salt}:${pin}`);
+}
+
+function quickAccessError(reason) {
+  const message = reason instanceof Error ? reason.message : '';
+  if (/entitlement|(?:get|set|delete)ValueWithKeyAsync/i.test(message)) {
+    return 'Защищённое хранилище на этом устройстве недоступно. Можно продолжить с обычным входом.';
+  }
+  return message || 'Попробуйте ещё раз.';
 }
 
 function Action({ title, onPress, disabled, secondary }) {
@@ -104,7 +118,7 @@ export default function QuickAccess({ session, saved, onComplete, onUnlock, onFo
     try {
       await action();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Попробуйте ещё раз.');
+      setError(quickAccessError(reason));
     } finally {
       inFlight.current = false;
       setBusy(false);
@@ -133,7 +147,9 @@ export default function QuickAccess({ session, saved, onComplete, onUnlock, onFo
     void run(async () => {
       const salt = Crypto.randomUUID();
       const hash = await pinDigest(pin, salt);
-      await clearQuickAccess();
+      if (!iosExpoGo && (await readRecord())?.method === 'biometric') {
+        await SecureStore.deleteItemAsync(BIOMETRIC_KEY, biometricOptions);
+      }
       await saveRecord({ method: 'pin', salt, hash, attempts: 0, session });
       await onComplete(session);
     });
@@ -169,7 +185,8 @@ export default function QuickAccess({ session, saved, onComplete, onUnlock, onFo
         const attempts = record.attempts + 1;
         await saveRecord({ ...record, attempts });
         if (attempts === MAX_ATTEMPTS) {
-          await clearQuickAccess();
+          // The persisted attempt limit already disables the old PIN.
+          await clearQuickAccess().catch(() => {});
           await onForget('Слишком много неверных попыток. Войдите с паролем.');
           return;
         }
@@ -193,8 +210,13 @@ export default function QuickAccess({ session, saved, onComplete, onUnlock, onFo
 
   function usePassword() {
     void run(async () => {
-      await clearQuickAccess();
-      await onForget();
+      let message;
+      try {
+        await clearQuickAccess();
+      } catch {
+        message = 'Не удалось очистить быстрый вход на устройстве. Войдите с паролем.';
+      }
+      await onForget(message);
     });
   }
 

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { EmployeeCamera, TaskPhotoGallery } from './TaskPhotos';
 import FieldReport, { CHECKLIST_OUTCOMES, DEFAULT_CHECKLIST_TITLES, PRIORITY_LABELS, RESULT_FIELDS } from './FieldReport';
 import { Icon } from './ui';
@@ -81,6 +81,7 @@ export function WorkScreens({ task, setTask, onBack, onOpenTask, onLocate, onUpl
   const photoPairs = task.photoPairs?.length
     ? task.photoPairs
     : [{ key: 'main', label: 'Общий вид', before, after }];
+  const hasBeforePhotos = photoPairs.every(pair => pair.before);
   const checklist = checklistDraft ?? task.checklist;
   const outcome = outcomeDraft ?? { ...task.outcome, work: task.outcome?.work ?? task.result ?? '' };
   const marked = checklist?.filter(item => item.status).length;
@@ -102,7 +103,17 @@ export function WorkScreens({ task, setTask, onBack, onOpenTask, onLocate, onUpl
     checklist: checklist.map(({ id, status: itemStatus, comment }) => ({ id, status: itemStatus ?? null, comment: (comment ?? '').trim() })),
     outcome: Object.fromEntries(RESULT_FIELDS.map(([key]) => [key, (outcome[key] ?? '').trim()])),
   });
-  const saveDraft = () => update(reportValues());
+  const saveDraft = async () => {
+    if (await update(reportValues())) {
+      setChecklistDraft(null);
+      setOutcomeDraft(null);
+    }
+  };
+  const openRelatedTask = (id) => {
+    if (onOpenTask(id) === false) {
+      Alert.alert('Заявка недоступна', 'Открыть можно только заявки, назначенные вам.');
+    }
+  };
 
   const primaryAction = {
     assigned: ['Принять задачу', 'accepted'],
@@ -114,8 +125,8 @@ export function WorkScreens({ task, setTask, onBack, onOpenTask, onLocate, onUpl
     work: ['Передать на проверку', 'review'],
   }[status];
   let actionHint = '';
-  if (!before && (status === 'arrived' || (onUploadPhoto && ['paused', 'rework'].includes(status)))) {
-    actionHint = 'Добавьте фото «до», чтобы начать работу.';
+  if (!hasBeforePhotos && (status === 'arrived' || (onUploadPhoto && ['paused', 'rework'].includes(status)))) {
+    actionHint = 'Добавьте фото «до» для каждой пары, чтобы начать работу.';
   } else if (status === 'work' && !ready) {
     actionHint = 'Заполните чек-лист и добавьте снимки «до» и «после» для каждой пары.';
   } else if (status === 'work' && !(checklist ? outcome.work : result).trim()) {
@@ -231,11 +242,11 @@ export function WorkScreens({ task, setTask, onBack, onOpenTask, onLocate, onUpl
             </View>
           ) : null}
           {task.repeatOf ? (
-            onOpenTask ? <Action secondary onPress={() => onOpenTask(task.repeatOf)}>Исходная заявка №{task.repeatOf}</Action>
+            onOpenTask ? <Action secondary onPress={() => openRelatedTask(task.repeatOf)}>Исходная заявка №{task.repeatOf}</Action>
               : <Text style={styles.body}>Исходная заявка №{task.repeatOf}</Text>
           ) : null}
           {task.repeatTaskId ? (
-            onOpenTask ? <Action secondary onPress={() => onOpenTask(task.repeatTaskId)}>Повторный выезд №{task.repeatTaskId}</Action>
+            onOpenTask ? <Action secondary onPress={() => openRelatedTask(task.repeatTaskId)}>Повторный выезд №{task.repeatTaskId}</Action>
               : <Text style={styles.body}>Повторный выезд №{task.repeatTaskId}</Text>
           ) : null}
           {task.repeatReason ? <Text style={styles.body}>Причина повторного выезда · {task.repeatReason}</Text> : null}
@@ -338,7 +349,7 @@ export function WorkScreens({ task, setTask, onBack, onOpenTask, onLocate, onUpl
               </View>
             ))}
             <TaskPhotoGallery taskId={task.id} request={request} imageSource={imageSource}
-              kinds={['before', 'after']} comparisonPairs={photoPairs} location={task.address || task.object}
+              kinds={['before', 'after']} photoPairs={photoPairs}
               revision={galleryRevision} />
           </View>
         ) : ['arrived', 'work', 'paused', 'review', 'done'].includes(status) && !onUploadPhoto ? (

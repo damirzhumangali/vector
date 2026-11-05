@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Подтверждение выезда · qwork</title>
+  <style>
+    * { box-sizing: border-box }
+    body { margin: 0; padding: 24px 16px; background: #f5f7fc; color: #142034; font: 16px system-ui, sans-serif }
+    main { max-width: 500px; margin: auto; padding: 24px; border-radius: 20px; background: #fff }
+    .brand { color: #087cff; font-size: 24px; font-weight: 750 }
+    h1 { font-size: 24px; margin: 16px 0 8px }
+    p { line-height: 1.5; color: #53647b }
+    label, legend { font-weight: 600 }
+    label { display: block; margin: 16px 0 }
+    input:not([type=radio]), textarea { display: block; width: 100%; margin-top: 6px; padding: 11px; border: 1px solid #c6d3e3; border-radius: 9px; font: inherit }
+    fieldset { margin: 16px 0; padding: 0 12px; border: 1px solid #c6d3e3; border-radius: 9px }
+    button { width: 100%; padding: 13px; border: 0; border-radius: 9px; background: #087cff; color: #fff; font: inherit; font-weight: 650 }
+    button:disabled { opacity: .6 }
+    #error { color: #a4253a }
+    #success { color: #166347 }
+    [hidden] { display: none !important }
+  </style>
+  <script src="/representative.js" defer></script>
+</head>
+<body>
+  <main>
+    <div class="brand">qwork</div>
+    <h1>Подтверждение выезда</h1>
+    <p id="task" aria-live="polite">Проверяем ссылку…</p>
+    <form id="review" hidden>
+      <label>Ваше имя<input id="name" required maxlength="120" autocomplete="name"></label>
+      <fieldset>
+        <legend>Результат выезда</legend>
+        <label><input type="radio" name="decision" value="confirmed" required> Подтверждаю работу</label>
+        <label><input type="radio" name="decision" value="remark" required> Есть замечание</label>
+      </fieldset>
+      <div id="remark" hidden>
+        <label>Причина<textarea id="reason" rows="2" maxlength="400"></textarea></label>
+        <label>Комментарий<textarea id="comment" rows="3" maxlength="1500"></textarea></label>
+        <label>Фото, если нужно<input id="photo" type="file" accept="image/jpeg,image/png"></label>
+        <p>JPEG или PNG до 5 МБ.</p>
+      </div>
+      <button type="submit">Отправить решение</button>
+    </form>
+    <p id="error" role="alert" hidden></p>
+    <p id="success" role="status" hidden></p>
+  </main>
+</body>
+</html>

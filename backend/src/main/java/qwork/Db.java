@@ -29,7 +29,8 @@ final class Db {
     private static final List<String> MIGRATIONS = List.of(
         "0001_initial.sql", "0002_media.sql", "0003_places.sql", "0004_sync.sql",
         "0005_shifts.sql", "0006_incidents.sql", "0007_planning.sql", "0008_auto_assignment.sql",
-        "0009_xlsx_import.sql", "0010_departments.sql", "0011_login_registry.sql", "0012_optional_email.sql"
+        "0009_xlsx_import.sql", "0010_departments.sql", "0011_login_registry.sql", "0012_optional_email.sql",
+        "0013_field_reports.sql", "0014_representative_reviews.sql", "0015_field_operations.sql"
     );
     private static final String SQLITE_SCHEMA = """
         CREATE TABLE IF NOT EXISTS companies (
@@ -159,7 +160,8 @@ final class Db {
             try (Statement statement = db.createStatement()) {
                 for (String sql : (SQLITE_SCHEMA + Media.SQLITE_SCHEMA + Places.SQLITE_SCHEMA + Sync.SQLITE_SCHEMA
                         + Shift.SQLITE_SCHEMA + Incidents.SQLITE_SCHEMA + Planning.SQLITE_SCHEMA
-                        + AutoAssignment.SQLITE_SCHEMA + XlsxImport.SQLITE_SCHEMA).split(";")) {
+                        + AutoAssignment.SQLITE_SCHEMA + XlsxImport.SQLITE_SCHEMA
+                        + RepresentativeReviews.SQLITE_SCHEMA + Trips.SQLITE_SCHEMA).split(";")) {
                     if (!sql.isBlank()) {
                         statement.execute(sql);
                     }
@@ -188,6 +190,7 @@ final class Db {
             ));
             addMissingColumns(db, "tasks", Map.of("object_id", "INTEGER REFERENCES work_sites(id)"));
             addMissingColumns(db, "task_events", Map.of("position", "TEXT", "received_at", "TEXT"));
+            FieldWork.initSqlite(db);
             update(db, """
                 CREATE INDEX IF NOT EXISTS task_events_gps_arrivals ON task_events(actor_id, id)
                 WHERE status = 'arrived' AND position IS NOT NULL

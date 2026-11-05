@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: qwork-api
+    runtime: docker
+    plan: free
+    region: frankfurt
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /health
+    autoDeployTrigger: off
+    envVars:
+      - key: QWORK_DATABASE_URL
+        sync: false
+      - key: QWORK_TRUST_PROXY
+        value: render

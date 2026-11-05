@@ -17,10 +17,13 @@ import { OfficeShiftPanel, TaskTransfer } from './ShiftScreens';
 import PlanningScreens from './PlanningScreens';
 import AnalyticsScreens from './AnalyticsScreens';
 import DeadlinePicker, { deadlineToIso } from './DeadlinePicker';
+import FieldReport, { PRIORITY_LABELS } from './FieldReport';
+import { OfficeFieldOperations } from './FieldOperations';
+import RepresentativeReview from './RepresentativeReview';
 import { Icon, colors } from './ui';
 
 const MATERIAL_KINDS = ['material'];
-const REPORT_KINDS = ['before', 'after'];
+const REPORT_KINDS = ['before', 'after', 'checklist'];
 const CONFLICT_REFRESH_MS = 15000;
 
 const statusLabels = {
@@ -156,11 +159,13 @@ function Dashboard({ tasks, employees, session, manager, onOpen, onTask }) {
     ['check', 'Приёмка работ', `${pending.length} на проверке`, 'tasks', '#E9F3FF', colors.blue],
     ['chart', 'Аналитика', 'Показатели и отчёты', 'analytics', '#E8F9F0', '#1FB87D'],
     ['calendar', 'Смены и ситуации', 'График и согласования', 'operations', '#FFF1E8', '#F28B39'],
+    ['pin', 'Выездной контроль', 'Доска и командировки', 'field-operations', '#EAF4FF', colors.blue],
   ] : [
     ['clipboard', 'Заявки', `${active.length} активных работ`, 'tasks', '#E9F3FF', colors.blue],
     ['users', 'Команда', `${employees.filter(person => person.role === 'employee').length} сотрудников`, 'team', '#E8F9F0', '#1FB87D'],
     ['calendar', 'Плановые работы', 'Шаблоны и импорт Excel', 'planning', '#FFF1E8', '#F28B39'],
     ['clock', 'Смены и ситуации', 'График и дежурства', 'operations', '#FFF8E3', '#E7A314'],
+    ['pin', 'Выездной контроль', 'Доска и командировки', 'field-operations', '#EAF4FF', colors.blue],
   ];
   return <>
     <View style={styles.todayCard}>
@@ -229,8 +234,18 @@ function ArrivalSettings({ value, onChange, disabled = false }) {
   </View>;
 }
 
-function TaskForm({ onCreate, onCancel, employees, objects, onCreateObject, server, busy, error }) {
+function TaskForm({ onCreate, onCancel, employees, objects, onCreateObject, request, server, busy, error }) {
   const [title, setTitle] = useState('');
+  const [purpose, setPurpose] = useState('');
+  const [priority, setPriority] = useState(2);
+  const [managerId, setManagerId] = useState(undefined);
+  const [assignmentRules, setAssignmentRules] = useState(null);
+  const [rulesError, setRulesError] = useState('');
+  const [rulesBusy, setRulesBusy] = useState(false);
+  const [showRuleSettings, setShowRuleSettings] = useState(false);
+  const [showReportSettings, setShowReportSettings] = useState(false);
+  const [checklistText, setChecklistText] = useState('');
+  const [pairText, setPairText] = useState('');
   const [object, setObject] = useState('');
   const [address, setAddress] = useState('');
   const [objectId, setObjectId] = useState(null);
@@ -244,6 +259,16 @@ function TaskForm({ onCreate, onCancel, employees, objects, onCreateObject, serv
   const objectInput = useRef(null);
   const descriptionInput = useRef(null);
   const selectedObject = objects.find((item) => item.id === objectId);
+  const selectedAssignee = employees.find(employee => employee.id === assigneeId);
+  const department = selectedAssignee?.department?.trim();
+  const objectRule = selectedObject && assignmentRules?.defaults?.find(rule => rule.objectId === selectedObject.id);
+  const departmentRule = department && assignmentRules?.defaults?.find(rule => rule.department === department);
+  const defaultRule = objectRule || departmentRule;
+  const selectedManager = managerId === undefined ? defaultRule?.managerId : managerId;
+  const ruleOptions = [
+    ...(selectedObject ? [{ key: 'object', field: { objectId: selectedObject.id }, label: selectedObject.name, rule: objectRule }] : []),
+    ...(department ? [{ key: 'department', field: { department }, label: department, rule: departmentRule }] : []),
+  ];
   const lat = Number(latitude.replace(',', '.'));
   const lon = Number(longitude.replace(',', '.'));
   const meters = Number(radius);
@@ -253,8 +278,35 @@ function TaskForm({ onCreate, onCancel, employees, objects, onCreateObject, serv
   const location = hasPoint && Number.isFinite(meters) && meters >= 1 && meters <= 10000
     ? { latitude: lat, longitude: lon, radius: meters } : null;
   const canCreate = Boolean(title.trim() && (server
-    ? (selectedObject || location) && employees.some((employee) => employee.id === assigneeId)
+    ? purpose.trim() && (selectedObject || location) && selectedAssignee
     : object.trim()));
+
+  useEffect(() => {
+    if (!server || !request) return;
+    let active = true;
+    request('/field-work/defaults').then(data => {
+      if (active) setAssignmentRules(data);
+    }).catch(failure => {
+      if (active) setRulesError(failure.message || 'Не удалось загрузить руководителей.');
+    });
+    return () => { active = false; };
+  }, [request, server]);
+
+  async function saveRule(field, nextManagerId) {
+    if (!request || busy || rulesBusy) return;
+    setRulesBusy(true);
+    setRulesError('');
+    try {
+      const updated = await request('/field-work/defaults', {
+        method: 'POST', body: { ...field, managerId: nextManagerId },
+      });
+      setAssignmentRules(updated);
+    } catch (failure) {
+      setRulesError(failure.message || 'Не удалось сохранить руководителя по умолчанию.');
+    } finally {
+      setRulesBusy(false);
+    }
+  }
 
   function setPin(event) {
     const { latitude: nextLat, longitude: nextLon } = event.nativeEvent.coordinate;
@@ -271,22 +323,38 @@ function TaskForm({ onCreate, onCancel, employees, objects, onCreateObject, serv
   }
 
   function submit() {
-    if (!canCreate || busy) return;
+    if (!canCreate || busy || rulesBusy) return;
     const deadline = deadlineToIso(deadlineValue);
     if (deadlineValue && (!deadline || +deadlineValue <= Date.now())) {
       setValidation('Выберите дату и время позже текущего.');
       return;
     }
+    const itemTitles = checklistText.split('\n').map(value => value.trim()).filter(Boolean);
+    const pairLabels = pairText.split('\n').map(value => value.trim()).filter(Boolean);
+    if (itemTitles.length > 20 || itemTitles.some(value => value.length > 160)) {
+      setValidation('Добавьте не более 20 пунктов чек-листа по 160 символов.');
+      return;
+    }
+    if (pairLabels.length > 7 || pairLabels.some(value => value.length > 100)) {
+      setValidation('Добавьте не более 7 дополнительных пар по 100 символов.');
+      return;
+    }
     setValidation('');
     Keyboard.dismiss();
     const fields = {
-      title: title.trim(), description: description.trim(),
+      title: title.trim(), description: description.trim(), purpose: purpose.trim(), priority,
       ...(selectedObject
         ? { objectId: selectedObject.id }
         : { object: object.trim(), address: address.trim(), ...(location && { location }) }),
       ...(deadline && { deadline }),
     };
-    onCreate(server ? { ...fields, assigneeId } : fields);
+    onCreate(server ? {
+      ...fields,
+      assigneeId,
+      ...(managerId !== undefined && { managerId }),
+      ...(itemTitles.length && { checklist: itemTitles.map((title, index) => ({ id: `step-${index + 1}`, title })) }),
+      ...(pairLabels.length && { photoPairs: pairLabels.map((label, index) => ({ key: `pair-${index + 1}`, label })) }),
+    } : fields);
   }
 
   return (
@@ -306,6 +374,16 @@ function TaskForm({ onCreate, onCancel, employees, objects, onCreateObject, serv
           submitBehavior="submit"
           onSubmitEditing={() => descriptionInput.current?.focus()}
         />
+        <Text style={styles.label}>Цель выезда</Text>
+        <TextInput accessibilityLabel="Цель выезда" value={purpose} onChangeText={setPurpose}
+          style={styles.input} placeholder="Например, подтвердить исправность освещения" placeholderTextColor="#64718A"
+          editable={!busy} maxLength={500} />
+        <Text style={styles.label}>Приоритет</Text>
+        {[1, 2, 3].map(value => (
+          <Choice key={value} selected={priority === value} onPress={() => { if (!busy) setPriority(value); }}>
+            {PRIORITY_LABELS[value]}
+          </Choice>
+        ))}
         <Text style={styles.label}>Описание (необязательно)</Text>
         <TextInput
           accessibilityLabel="Описание работы"
@@ -393,8 +471,65 @@ function TaskForm({ onCreate, onCancel, employees, objects, onCreateObject, serv
           )}
         </View>
       )}
+      {server && request && (
+        <View style={styles.card}>
+          <Text accessibilityRole="header" style={styles.cardTitle}>Ответственный руководитель</Text>
+          <Choice selected={managerId === undefined} onPress={() => setManagerId(undefined)}>
+            {defaultRule ? `По настройкам · ${defaultRule.managerName}` : 'По настройкам объекта или подразделения'}
+          </Choice>
+          {assignmentRules?.managers?.map(person => (
+            <Choice key={person.id} selected={managerId === person.id} onPress={() => setManagerId(person.id)}>
+              {person.name}
+            </Choice>
+          ))}
+          <Choice selected={managerId === null} onPress={() => setManagerId(null)}>Без руководителя для этой заявки</Choice>
+          <RequestError message={rulesError} />
+          <Button secondary disabled={rulesBusy || busy} onPress={() => setShowRuleSettings(value => !value)}>
+            {showRuleSettings ? 'Скрыть настройки' : 'Настроить назначение по умолчанию'}
+          </Button>
+          {showRuleSettings && (
+            <>
+              <Text style={styles.muted}>Выберите руководителя выше. При назначении настройка объекта имеет приоритет над подразделением.</Text>
+              {ruleOptions.length ? ruleOptions.map(({ key, field, label, rule }) => (
+                <View key={key} style={styles.formGroup}>
+                  <Text style={styles.label}>{key === 'object' ? 'Объект' : 'Подразделение'} · {label}</Text>
+                  <Text style={styles.muted}>{rule?.managerName ?? 'Руководитель по умолчанию не задан.'}</Text>
+                  <Button secondary disabled={busy || rulesBusy || !selectedManager || rule?.managerId === selectedManager}
+                    onPress={() => saveRule(field, selectedManager)}>Назначить по умолчанию</Button>
+                  {rule && <Button secondary disabled={busy || rulesBusy} onPress={() => saveRule(field, null)}>
+                    Удалить настройку
+                  </Button>}
+                </View>
+              )) : <Text style={styles.muted}>Выберите объект из справочника или сотрудника с подразделением.</Text>}
+            </>
+          )}
+        </View>
+      )}
+      {server && (
+        <View style={styles.card}>
+          <Text accessibilityRole="header" style={styles.cardTitle}>Содержание отчёта</Text>
+          <Text style={styles.muted}>По умолчанию будут стандартный чек-лист и одна пара фото «до» и «после».</Text>
+          <Button secondary disabled={busy} onPress={() => setShowReportSettings(value => !value)}>
+            {showReportSettings ? 'Скрыть настройки отчёта' : 'Настроить чек-лист и пары фото'}
+          </Button>
+          {showReportSettings && (
+            <>
+              <Text style={styles.label}>Свои пункты чек-листа</Text>
+              <TextInput accessibilityLabel="Свои пункты чек-листа" multiline editable={!busy}
+                value={checklistText} onChangeText={setChecklistText}
+                placeholder="Один пункт на строку. Оставьте пустым для стандартных пунктов."
+                placeholderTextColor="#64718A" maxLength={3220} style={[styles.input, styles.multiline]} />
+              <Text style={styles.label}>Дополнительные пары «До / После»</Text>
+              <TextInput accessibilityLabel="Дополнительные пары «До / После»" multiline editable={!busy}
+                value={pairText} onChangeText={setPairText}
+                placeholder="Укажите зону или пункт чек-листа, для которого нужна пара. Одна пара на строку."
+                placeholderTextColor="#64718A" maxLength={707} style={[styles.input, styles.multiline]} />
+            </>
+          )}
+        </View>
+      )}
       <RequestError message={validation || error} />
-      <Button onPress={submit} disabled={!canCreate || busy}>{busy ? 'Создаём…' : 'Создать заявку'}</Button>
+      <Button onPress={submit} disabled={!canCreate || busy || rulesBusy}>{busy ? 'Создаём…' : 'Создать заявку'}</Button>
     </>
   );
 }
@@ -535,6 +670,13 @@ function TaskDetails({ task }) {
       <TaskCard task={task} />
       <View style={styles.card}>
         <Text accessibilityRole="header" style={styles.cardTitle}>Детали заявки</Text>
+        {task.purpose ? <Text style={styles.muted}>Цель выезда · {task.purpose}</Text> : null}
+        {task.priority ? <Text style={styles.muted}>Приоритет · {PRIORITY_LABELS[task.priority]}</Text> : null}
+        {task.managerName ? <Text style={styles.muted}>Руководитель · {task.managerName}</Text> : null}
+        {task.representativeDecision ? (
+          <Text style={styles.label}>{task.representativeDecision === 'confirmed' ? 'Подтверждено представителем' : 'Есть замечание'}</Text>
+        ) : null}
+        {task.repeatReason ? <Text style={styles.muted}>Причина повторного выезда · {task.repeatReason}</Text> : null}
         {task.address && task.address !== task.object ? <Text style={styles.muted}>{task.address}</Text> : null}
         {task.description ? <Text style={styles.muted}>{task.description}</Text> : null}
         {task.deadline ? <Text style={styles.muted}>Выполнить до · {formatDate(task.deadline)}</Text> : null}
@@ -618,10 +760,14 @@ function TaskActions({ task, onCancelTask, onRepeatTask, busy, error }) {
           <Text style={styles.muted}>
             Создадим связанную заявку с тем же объектом и исполнителем.
           </Text>
+          <Text style={styles.label}>Причина повторного выезда</Text>
+          <TextInput accessibilityLabel="Причина повторного выезда" editable={!busy} multiline
+            style={[styles.input, styles.multiline]} value={reason} onChangeText={setReason}
+            placeholder="Укажите, зачем нужно вернуться на объект" placeholderTextColor="#64718A" maxLength={1000} />
           <DeadlinePicker value={deadlineValue} disabled={busy}
             onChange={value => { setDeadlineValue(value); setValidation(''); }} />
           <RequestError message={validation} />
-          <Button disabled={busy} onPress={() => {
+          <Button disabled={busy || !reason.trim()} onPress={() => {
             const deadline = deadlineToIso(deadlineValue);
             if (deadlineValue && (!deadline || +deadlineValue <= Date.now())) {
               setValidation('Выберите дату и время позже текущего.');
@@ -629,14 +775,14 @@ function TaskActions({ task, onCancelTask, onRepeatTask, busy, error }) {
             }
             setValidation('');
             Keyboard.dismiss();
-            onRepeatTask(task.id, deadline ? { deadline } : {});
+            onRepeatTask(task.id, { reason: reason.trim(), ...(deadline && { deadline }) });
           }}>Создать повторный выезд</Button>
           <Button disabled={busy} onPress={() => setAction(null)} secondary>Назад</Button>
         </>
       ) : (
         <>
-          {canCancel && <Button disabled={busy} onPress={() => setAction('cancel')} secondary>Отменить заявку</Button>}
-          {canRepeat && <Button disabled={busy} onPress={() => setAction('repeat')} secondary>Повторный выезд</Button>}
+          {canCancel && <Button disabled={busy} onPress={() => { setReason(''); setAction('cancel'); }} secondary>Отменить заявку</Button>}
+          {canRepeat && <Button disabled={busy} onPress={() => { setReason(''); setAction('repeat'); }} secondary>Повторный выезд</Button>}
         </>
       )}
     </View>
@@ -646,7 +792,10 @@ function TaskActions({ task, onCancelTask, onRepeatTask, busy, error }) {
 function Review({ task, onDecision, busy, error }) {
   const [returning, setReturning] = useState(false);
   const [reason, setReason] = useState('');
-  const completed = task.checks.filter(Boolean).length;
+  const completed = task.checklist ? task.checklist.filter(item => item.status).length : task.checks.filter(Boolean).length;
+  const total = task.checklist?.length ?? task.checks.length;
+  const before = task.photoPairs?.filter(pair => pair.before).length ?? task.photos.before;
+  const after = task.photoPairs?.filter(pair => pair.after).length ?? task.photos.after;
 
   function decide(status, comment = '') {
     if (busy) return;
@@ -660,9 +809,9 @@ function Review({ task, onDecision, busy, error }) {
         <Text style={styles.cardTitle}>Материалы отчёта</Text>
         <View style={styles.metrics}>
           {[
-            ['Чек-лист', `${completed}/${task.checks.length}`],
-            ['Фото до', task.photos.before],
-            ['Фото после', task.photos.after],
+            ['Заполнено пунктов', `${completed}/${total}`],
+            ['Фото до', before],
+            ['Фото после', after],
           ].map(([label, value]) => (
             <View key={label} style={styles.metric} accessibilityLabel={`${label} · ${value}`}>
               <Text style={styles.metricValue}>{value}</Text>
@@ -940,6 +1089,7 @@ export default function OfficeScreens({
   const server = Boolean(session);
   const assignees = employees.filter((employee) => employee.role === 'employee');
   const [selectedId, setSelectedId] = useState(null);
+  const [reportOpen, setReportOpen] = useState(false);
   const [departmentEmployeeId, setDepartmentEmployeeId] = useState(null);
   const [passwordEmployeeId, setPasswordEmployeeId] = useState(null);
   const manager = role === 'manager';
@@ -947,10 +1097,11 @@ export default function OfficeScreens({
   const operations = creating === 'operations';
   const planning = creating === 'planning';
   const analytics = creating === 'analytics';
+  const fieldOperations = creating === 'field-operations';
   const departmentEmployee = employees.find(employee => employee.id === departmentEmployeeId);
   const passwordEmployee = employees.find(employee => employee.id === passwordEmployeeId);
   const selected = tasks.find((task) => task.id === selectedId);
-  const repeat = selected && tasks.find((task) => task.repeatOf === selected.id);
+  const repeat = selected && tasks.find((task) => task.id === selected.repeatTaskId || task.repeatOf === selected.id);
   const original = selected?.repeatOf && tasks.find((task) => task.id === selected.repeatOf);
   const pending = tasks.filter((task) => task.status === 'review');
   const accepted = tasks.filter((task) => task.status === 'done');
@@ -971,17 +1122,19 @@ export default function OfficeScreens({
     internalNavigation.current = null;
     setCreating(section === 'home' ? 'overview' : section === 'tasks' ? null : section);
     setSelectedId(null);
+    setReportOpen(false);
     setError('');
   }, [section, navigationId]);
 
   function navigate(next) {
     const destination = next === 'overview' ? 'home' : next === null ? 'tasks' : next;
-    if (['home', 'tasks', 'team', 'operations', 'planning', 'analytics'].includes(destination)) {
+    if (['home', 'tasks', 'team', 'operations', 'planning', 'analytics', 'field-operations'].includes(destination)) {
       internalNavigation.current = destination;
       onSectionChange?.(destination);
     }
     setCreating(next);
     setSelectedId(null);
+    setReportOpen(false);
     setError('');
   }
 
@@ -1114,10 +1267,10 @@ export default function OfficeScreens({
         <View style={styles.heading}>
           <View style={styles.headingCopy}>
             <Text accessibilityRole="header" style={styles.title}>
-              {selected ? 'Карточка заявки' : creating === 'overview' ? 'Главная' : analytics ? 'Аналитика' : planning ? 'Плановые работы' : operations ? 'Рабочее время' : creating === 'team' ? 'Команда' : creating === 'task' ? 'Новая заявка' : creating ? 'Доступ сотрудника' : manager ? 'Приёмка работ' : 'Заявки'}
+              {selected ? 'Карточка заявки' : creating === 'overview' ? 'Главная' : analytics ? 'Аналитика' : planning ? 'Плановые работы' : operations ? 'Рабочее время' : fieldOperations ? 'Выездной контроль' : creating === 'team' ? 'Команда' : creating === 'task' ? 'Новая заявка' : creating ? 'Доступ сотрудника' : manager ? 'Приёмка работ' : 'Заявки'}
             </Text>
             <Text style={styles.subtitle}>
-              {selected ? `Заявка №${selected.id}` : creating === 'overview' ? 'Все рабочие дела в одном месте' : analytics ? 'Статистика выполнения и выездов' : planning ? 'Повторяющиеся работы и автоназначение' : operations ? 'График, дежурства и согласования' : creating === 'team' ? 'Сотрудники и доступ к компании' : creating === 'task' ? 'Поставьте задачу сотруднику' : creating ? 'Настройте доступ к рабочему пространству' : manager ? 'Проверяйте отчёты сотрудников' : 'Постановка и контроль выездных работ'}
+              {selected ? `Заявка №${selected.id}` : creating === 'overview' ? 'Все рабочие дела в одном месте' : analytics ? 'Статистика выполнения и выездов' : planning ? 'Повторяющиеся работы и автоназначение' : operations ? 'График, дежурства и согласования' : fieldOperations ? 'Отметки сотрудников, отклонения и командировки' : creating === 'team' ? 'Сотрудники и доступ к компании' : creating === 'task' ? 'Поставьте задачу сотруднику' : creating ? 'Настройте доступ к рабочему пространству' : manager ? 'Проверяйте отчёты сотрудников' : 'Постановка и контроль выездных работ'}
             </Text>
           </View>
           {!manager && !creating && !selected && <Pressable accessibilityRole="button" accessibilityLabel="Создать заявку" onPress={() => openForm('task')} style={styles.addButton}><Icon name="plus" color="#FFFFFF" size={24} /></Pressable>}
@@ -1135,7 +1288,7 @@ export default function OfficeScreens({
           <RequestError message={error} />
         </>}
 
-        {!server && ['team', 'operations', 'planning', 'analytics'].includes(creating) && <View style={styles.emptyCard}><Icon name="shield" size={30} color={colors.blue} /><Text style={styles.label}>Войдите в рабочее пространство</Text><Text style={styles.muted}>Этот раздел использует данные вашей компании.</Text><Button onPress={() => openForm(null)} secondary>К демонстрационным заявкам</Button></View>}
+        {!server && ['team', 'operations', 'planning', 'analytics', 'field-operations'].includes(creating) && <View style={styles.emptyCard}><Icon name="shield" size={30} color={colors.blue} /><Text style={styles.label}>Войдите в рабочее пространство</Text><Text style={styles.muted}>Этот раздел использует данные вашей компании.</Text><Button onPress={() => openForm(null)} secondary>К демонстрационным заявкам</Button></View>}
 
         {selected && (
           <>
@@ -1143,6 +1296,18 @@ export default function OfficeScreens({
               {manager ? '‹ К списку отчётов' : '‹ К заявкам'}
             </Button>
             <TaskDetails task={selected} />
+            <Button onPress={() => setReportOpen(true)} disabled={busy} secondary>Открыть отчёт по выезду</Button>
+            {reportOpen && (
+              <FieldReport task={selected} request={server ? request : undefined} imageSource={imageSource}
+                onClose={() => setReportOpen(false)} canReject={canReview && selected.status === 'review' && !busy}
+                onRejected={onPhotoRejected}>
+                {server && request && (
+                  <RepresentativeReview task={selected} request={request} imageSource={imageSource}
+                    onRework={canReview ? reason => decide(selected.id, 'rework', reason) : null} />
+                )}
+                <RequestError message={error} />
+              </FieldReport>
+            )}
             {server && request && imageSource && (
               <>
                 <View style={styles.card}>
@@ -1157,7 +1322,7 @@ export default function OfficeScreens({
                 <View style={styles.card}>
                   <Text accessibilityRole="header" style={styles.cardTitle}>Фотоотчёт сотрудника</Text>
                   <TaskPhotoGallery taskId={selected.id} request={request} imageSource={imageSource}
-                    kinds={REPORT_KINDS} revision={selected.revision}
+                    kinds={REPORT_KINDS} revision={selected.revision} checklist={selected.checklist}
                     canReject={canReview && selected.status === 'review' && !busy}
                     onRejected={onPhotoRejected} />
                 </View>
@@ -1200,6 +1365,13 @@ export default function OfficeScreens({
           <>
             <Button onPress={() => openForm(null)} secondary>{manager ? '‹ К приёмке' : '‹ К заявкам'}</Button>
             <OfficeShiftPanel request={request} role={role} employees={employees} tasks={tasks} />
+          </>
+        )}
+
+        {fieldOperations && server && request && (
+          <>
+            <Button onPress={() => openForm('overview')} secondary>‹ На главную</Button>
+            <OfficeFieldOperations request={request} tasks={tasks} onTask={id => openTask(String(id))} />
           </>
         )}
 
@@ -1253,6 +1425,7 @@ export default function OfficeScreens({
             onCancel={() => openForm(null)}
             employees={assignees}
             objects={objects}
+            request={request}
             onCreateObject={onCreateObject ? async (fields) => {
               let result;
               await submit(async () => { result = await onCreateObject(fields); });
@@ -1363,6 +1536,7 @@ const styles = StyleSheet.create({
     minHeight: 46,
   },
   multiline: { minHeight: 92, textAlignVertical: 'top' },
+  formGroup: { gap: 7, paddingVertical: 8, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border },
   error: { color: '#982F36', fontWeight: '700', fontSize: 14, lineHeight: 20 },
   choice: {
     minHeight: 48, paddingHorizontal: 12, paddingVertical: 9, borderRadius: 12,

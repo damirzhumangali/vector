@@ -407,7 +407,7 @@ function ShiftChoice({ shift, reminder, tasks, request, busy, offline, run }) {
 }
 
 export function EmployeeShiftPanel({ request, onUrgentLeave, offline = false, onChange, onShifts, tasks = [],
-  urgentLeavePending = false }) {
+  urgentLeavePending = false, onTrips }) {
   const { data, reload, error } = useShiftData(request, offline, onShifts);
   const { busy, notice, run } = useAction(reload, onChange);
   const [now, setNow] = useState(Date.now);
@@ -428,6 +428,7 @@ export function EmployeeShiftPanel({ request, onUrgentLeave, offline = false, on
   return (
     <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
       <View style={styles.pageHeading}><Text accessibilityRole="header" style={styles.title}>Рабочее время</Text><Text style={styles.muted}>Смены, дежурства и обращения</Text></View>
+      {onTrips && <Action onPress={onTrips}>Мои командировки</Action>}
       <ShiftOverview shift={displayedShift} nextShift={upcomingShift === displayedShift ? null : upcomingShift}
         incidents={data.incidents} now={now} scheduleLoaded={data.scheduleLoaded} scheduleUnavailable={offline || Boolean(error)}>
         {showShiftChoice && <ShiftChoice key={activeShift.id} shift={activeShift}

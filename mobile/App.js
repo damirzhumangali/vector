@@ -12,6 +12,7 @@ import EmployeeDashboard from './src/EmployeeDashboard';
 import EmailSettings from './src/EmailSettings';
 import { colors as c, Icon } from './src/ui';
 import { EmployeeShiftPanel, EmployeeShiftReminder } from './src/ShiftScreens';
+import { EmployeeTrips } from './src/FieldOperations';
 import { updateShiftReminders } from './src/shiftReminders';
 import { WorkScreens } from './src/WorkScreens';
 import { apiImageSource, apiOrigin, apiRequest } from './src/api';
@@ -618,14 +619,18 @@ function Workspace() {
     if (savingTaskRef.current) return;
     savingTaskRef.current = true;
     setSavingTask(true);
-    const { id, status, checks, arrival, position, result, occurredAt } = nextTask;
-    const statusChanged = status !== offlineSnapshot?.tasks?.find(task => task.id === id)?.status;
+    const { id, status, checks, checklist, arrival, position, result, outcome, occurredAt } = nextTask;
+    const previous = offlineSnapshot?.tasks?.find(task => task.id === id);
+    const statusChanged = status !== previous?.status;
     try {
       return await enqueue(id, 'patch', {
-        status, checks,
+        status,
+        ...(!checklist && checks ? { checks } : {}),
+        ...(checklist && checklist !== previous?.checklist ? { checklist } : {}),
         ...(statusChanged && status === 'arrived' && arrival ? { arrival } : {}),
         ...(statusChanged && position ? { position } : {}),
-        ...(status === 'review' && typeof result === 'string' ? { result } : {}),
+        ...(statusChanged && status === 'review' && typeof result === 'string' ? { result } : {}),
+        ...(outcome && outcome !== previous?.outcome ? { outcome } : {}),
       }, occurredAt);
     } catch (error) {
       if (sessionRef.current === session) Alert.alert('Изменение не сохранено', error.message);
@@ -752,9 +757,17 @@ function Workspace() {
               <View style={styles.empty}><Icon name="calendar" size={36} /><Text style={styles.taskTitle}>Ваш рабочий график</Text><Text style={styles.muted}>Войдите в компанию, чтобы увидеть назначенные смены.</Text>
                 <Pressable onPress={signOut} accessibilityRole="button" style={styles.demoEnter}><Text style={styles.demoEnterText}>Войти в аккаунт</Text></Pressable>
               </View>
+            ) : isEmployeeSession && page === 'trips' ? (
+              <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+                <Pressable accessibilityRole="button" onPress={() => navigate('shifts')} style={styles.exit}>
+                  <Text style={styles.exitText}>‹ К рабочему времени</Text>
+                </Pressable>
+                <EmployeeTrips request={request} offline={offlineMode || Boolean(networkError)} onTask={openEmployeeTask} />
+              </ScrollView>
             ) : isEmployeeSession && showShifts ? (
               <EmployeeShiftPanel request={request} offline={offlineMode || Boolean(networkError)} onChange={refreshWork}
                 tasks={tasks ?? []} onUrgentLeave={enqueueUrgentLeave} onShifts={onShifts}
+                onTrips={() => navigate('trips')}
                 urgentLeavePending={Boolean(offlineSnapshot?.urgentLeavePending)} />
             ) : tasks === null && !networkError ? (
               <View style={styles.loading}><ActivityIndicator color="#245BE8" /></View>
@@ -765,6 +778,7 @@ function Workspace() {
                   onLocate={session ? locateArrival : undefined} onUploadPhoto={session ? uploadPhoto : undefined}
                   request={session ? employeeGallery : request} imageSource={imageSource}
                   galleryRevision={`${selected.revision}|${offlineMode}|${materialsReady}|${offlineSnapshot?.pending}`}
+                  onOpenTask={id => tasks.some(task => task.id === id) && openEmployeeTask(id)}
                   onBack={() => setSelectedId(null)} />
               ) : (
                 <EmployeeHome tasks={tasks ?? []} onSelect={openEmployeeTask} />
@@ -805,7 +819,8 @@ function Workspace() {
                 role === 'employee' ? ['shifts', 'Рабочее время', 'clock'] : ['analytics', 'Аналитика', 'chart'],
                 ['profile', 'Профиль', 'user'],
               ].map(([key, label, icon]) => {
-                const active = page === key || (key === 'home' && ['team','planning','operations'].includes(page));
+                const active = page === key || (key === 'home' && ['team','planning','operations','field-operations'].includes(page))
+                  || (key === 'shifts' && page === 'trips');
                 return (
                   <Pressable key={key} accessibilityRole="tab" accessibilityLabel={label}
                     accessibilityState={{selected:active}} onPress={() => navigate(key)} style={styles.role}>

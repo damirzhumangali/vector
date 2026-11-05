@@ -168,9 +168,12 @@ final class AutoAssignment {
             var worker = selected.get();
             var actor = Map.<String, Object>of(
                 "id", number(job, "actor_id"), "company_id", company, "name", job.get("actor_name"), "role", "dispatcher");
+            long plannedPriority = number(job, "priority");
+            int priority = plannedPriority < 3 ? 1 : plannedPriority == 3 ? 2 : 3;
             var fields = Map.<String, Object>of(
                 "assigneeId", Long.toString(worker.id()), "objectId", job.get("object_id").toString(),
-                "title", job.get("title"), "description", job.get("description"), "deadline", job.get("deadline"));
+                "title", job.get("title"), "description", job.get("description"), "deadline", job.get("deadline"),
+                "priority", priority);
             var created = Tasks.createTask(db, actor, fields);
             String taskId = (String) ((Map<?, ?>) created.get("task")).get("id");
             int linked = Db.update(db, """

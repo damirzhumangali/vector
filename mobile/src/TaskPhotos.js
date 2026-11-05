@@ -14,7 +14,12 @@ const MAX_BASE64_LENGTH = 4 * Math.ceil(MAX_IMAGE_BYTES / 3);
 const MAX_IMAGE_PIXELS = 16_000_000;
 const PHOTO_SIZE_ERROR = 'Размер снимка превышает 12 МБ.';
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
-const PHOTO_LABELS = { before: 'Фото «до»', after: 'Фото «после»', material: 'Материал диспетчера' };
+const PHOTO_LABELS = {
+  before: 'Фото «до»',
+  after: 'Фото «после»',
+  checklist: 'Фото к пункту чек-листа',
+  material: 'Материал диспетчера',
+};
 
 function PhotoButton({ children, disabled = false, onPress, secondary = false, icon, tile = false }) {
   return (
@@ -114,7 +119,7 @@ async function getPhotoPosition(onLocate) {
   return {};
 }
 
-export function EmployeeCamera({ kind, onUpload, onLocate, disabled = false }) {
+export function EmployeeCamera({ kind, pairKey, checklistId, onUpload, onLocate, disabled = false }) {
   const camera = useRef(null);
   const actionInProgress = useRef(false);
   const [permission, requestPermission] = useCameraPermissions();
@@ -210,7 +215,12 @@ export function EmployeeCamera({ kind, onUpload, onLocate, disabled = false }) {
     setError('');
     try {
       await onUpload({
-        kind, imageBase64: preview.imageBase64, capturedAt: preview.capturedAt, ...await preview.position,
+        kind,
+        ...(pairKey && { pairKey }),
+        ...(checklistId && { checklistId }),
+        imageBase64: preview.imageBase64,
+        capturedAt: preview.capturedAt,
+        ...await preview.position,
       });
       setPreview(null);
       setVisible(false);
@@ -334,15 +344,38 @@ export function DispatcherPhotoPicker({ onUpload, disabled = false }) {
   );
 }
 
-function GalleryPhoto({ photo, path, imageSource, onReject, rejectDisabled }) {
-  const [show, setShow] = useState(false);
+function PhotoMetadata({ photo, location }) {
+  const captured = photo.capturedAt || photo.createdAt;
+  const date = captured ? new Date(captured) : null;
+  const hasPosition = Number.isFinite(photo.latitude) && Number.isFinite(photo.longitude);
+  const geofence = {
+    inside: 'В зоне объекта', outside: 'Вне зоны объекта',
+    uncertain: 'Недостаточно точная геопозиция', unavailable: 'Геопозиция недоступна',
+  }[photo.geofenceStatus];
+  return (
+    <>
+      {date && Number.isFinite(date.getTime()) && <Text style={styles.muted}>{date.toLocaleString('ru-RU')}</Text>}
+      {location ? <Text style={styles.muted}>{location}</Text> : null}
+      <Text style={styles.muted}>
+        {hasPosition ? `${photo.latitude.toFixed(5)}, ${photo.longitude.toFixed(5)}` : 'Без координат GPS'}
+      </Text>
+      {Number.isFinite(photo.accuracy) ? <Text style={styles.muted}>Точность GPS · ±{Math.round(photo.accuracy)} м</Text> : null}
+      {geofence && geofence !== 'unavailable' ? (
+        <Text style={photo.geofenceStatus === 'outside' ? styles.error : styles.muted}>{geofence}</Text>
+      ) : null}
+    </>
+  );
+}
+
+function GalleryPhoto({ photo, path, imageSource, onReject, rejectDisabled, comparison = false, location, checklistTitle }) {
+  const [show, setShow] = useState(comparison);
   const [imageError, setImageError] = useState(false);
   const [reason, setReason] = useState(null);
   const [error, setError] = useState('');
   const [sending, setSending] = useState(false);
   const actionInProgress = useRef(false);
   const rejected = Boolean(photo.rejectedAt || photo.rejectedReason);
-  const label = PHOTO_LABELS[photo.kind] || 'Фотография';
+  const label = comparison ? (photo.kind === 'before' ? 'До' : 'После') : (PHOTO_LABELS[photo.kind] || 'Фотография');
 
   async function reject() {
     if (actionInProgress.current || !reason?.trim()) return;
@@ -361,18 +394,21 @@ function GalleryPhoto({ photo, path, imageSource, onReject, rejectDisabled }) {
   }
 
   return (
-    <View style={styles.photoCard}>
+    <View style={[styles.photoCard, comparison && styles.comparisonCard]}>
       <View style={styles.photoHeading}>
-        <View style={styles.photoIcon}><Icon name="camera" color="#087CFF" size={18} /></View>
+        {!comparison && <View style={styles.photoIcon}><Icon name="camera" color="#087CFF" size={18} /></View>}
         <Text style={styles.photoTitle}>{label}</Text>
         {photo.pending ? <Icon name="clock" color="#F3A227" size={17} /> : rejected ? <Icon name="alert" color="#ED5267" size={17} /> : <Icon name="check" color="#21B885" size={17} />}
       </View>
       {photo.caption ? <Text style={styles.muted}>{photo.caption}</Text> : null}
+      {checklistTitle ? <Text style={styles.muted}>{checklistTitle}</Text> : null}
       {photo.authorName ? <Text style={styles.muted}>{photo.authorName}</Text> : null}
       {rejected && <Text style={styles.error}>Отклонено{photo.rejectedReason ? ' · ' + photo.rejectedReason : ''}</Text>}
       {show && !imageError ? (
-        <Image accessibilityLabel={label} style={styles.photo} source={photo.localUri ? { uri: photo.localUri } : imageSource(path)} resizeMode="contain" onError={() => setImageError(true)} />
+        <Image accessibilityLabel={label} style={[styles.photo, comparison && styles.comparisonImage]}
+          source={photo.localUri ? { uri: photo.localUri } : imageSource(path)} resizeMode="contain" onError={() => setImageError(true)} />
       ) : null}
+      {comparison && <PhotoMetadata photo={photo} location={location} />}
       {imageError && <ErrorMessage message="Не удалось открыть снимок." />}
       {photo.pending && <Text style={styles.muted}>Сохранено на телефоне · ожидает отправки</Text>}
       <PhotoButton
@@ -406,7 +442,10 @@ function GalleryPhoto({ photo, path, imageSource, onReject, rejectDisabled }) {
   );
 }
 
-export function TaskPhotoGallery({ taskId, request, imageSource, kinds, canReject = false, onRejected, revision }) {
+export function TaskPhotoGallery({
+  taskId, request, imageSource, kinds, canReject = false, onRejected, revision, comparisonPairs,
+  location, checklist = [],
+}) {
   const requestRef = useRef(request);
   const pendingRejection = useRef(false);
   const [version, setVersion] = useState(0);
@@ -445,7 +484,21 @@ export function TaskPhotoGallery({ taskId, request, imageSource, kinds, canRejec
   }
 
   if (state?.taskId !== taskId) return <ActivityIndicator accessibilityLabel="Загрузка фотографий" />;
-  const photos = state.photos.filter(photo => !kinds || kinds.includes(photo.kind));
+  const photos = (state.photos ?? []).filter(photo => !kinds || kinds.includes(photo.kind));
+  const activeProof = photo => ['before', 'after'].includes(photo.kind) && !photo.rejectedAt && !photo.rejectedReason;
+  const renderPhoto = (photo, comparison = false) => (
+    <GalleryPhoto
+      key={String(taskId) + ':' + String(photo.id)}
+      photo={photo}
+      path={path + '/' + encodeURIComponent(photo.id)}
+      imageSource={imageSource}
+      onReject={canReject ? reject : undefined}
+      rejectDisabled={rejecting}
+      comparison={comparison}
+      location={location}
+      checklistTitle={checklist.find(item => item.id === photo.checklistId)?.title}
+    />
+  );
   return (
     <View style={styles.group}>
       {state.error ? (
@@ -453,17 +506,24 @@ export function TaskPhotoGallery({ taskId, request, imageSource, kinds, canRejec
           <ErrorMessage message={state.error} />
           <PhotoButton onPress={() => setVersion(value => value + 1)} secondary>Повторить загрузку</PhotoButton>
         </>
-      ) : photos.length === 0 ? <Text style={styles.muted}>Фотографий пока нет.</Text> : null}
-      {photos.map(photo => (
-        <GalleryPhoto
-          key={String(taskId) + ':' + String(photo.id)}
-          photo={photo}
-          path={path + '/' + encodeURIComponent(photo.id)}
-          imageSource={imageSource}
-          onReject={canReject ? reject : undefined}
-          rejectDisabled={rejecting}
-        />
+      ) : photos.length === 0 && !comparisonPairs ? <Text style={styles.muted}>Фотографий пока нет.</Text> : null}
+      {comparisonPairs?.map(pair => (
+        <View key={pair.key} style={styles.group}>
+          <Text accessibilityRole="header" style={styles.photoTitle}>{pair.label}</Text>
+          <View style={styles.comparisonRow}>
+            {['before', 'after'].map(kind => {
+              const photo = photos.find(item => activeProof(item) && item.kind === kind && (item.pairKey ?? 'main') === pair.key);
+              return photo ? renderPhoto(photo, true) : (
+                <View key={kind} style={[styles.photoCard, styles.comparisonCard]}>
+                  <Text style={styles.photoTitle}>{kind === 'before' ? 'До' : 'После'}</Text>
+                  <Text style={styles.muted}>Нет снимка</Text>
+                </View>
+              );
+            })}
+          </View>
+        </View>
       ))}
+      {photos.filter(photo => !comparisonPairs || !activeProof(photo)).map(photo => renderPhoto(photo))}
     </View>
   );
 }
@@ -482,6 +542,9 @@ const styles = StyleSheet.create({
   cameraPreview: { flex: 1, width: '100%' },
   cameraControls: { padding: 16, gap: 8, backgroundColor: '#FFFFFF' },
   photoCard: { backgroundColor: '#F5F7FC', borderRadius: 12, padding: 11, gap: 7 },
+  comparisonRow: { flexDirection: 'row', alignItems: 'stretch', gap: 8 },
+  comparisonCard: { flex: 1, minWidth: 0 },
+  comparisonImage: { height: 144 },
   photoHeading: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   photoIcon: { width: 30, height: 30, borderRadius: 9, backgroundColor: '#EAF4FF', alignItems: 'center', justifyContent: 'center' },
   photo: { width: '100%', height: 220, backgroundColor: '#142034', borderRadius: 10 },

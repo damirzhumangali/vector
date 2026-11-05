@@ -29,8 +29,13 @@ final class Main {
     private static final int MAX_BODY = 16_384;
     private static final int MAX_PHOTO_BODY = ((Media.MAX_IMAGE_BYTES + 2) / 3) * 4 + MAX_BODY;
     private static final int MAX_IMPORT_BODY = ((XlsxImport.MAX_BYTES + 2) / 3) * 4 + 1024;
+    private static final int MAX_REPORT_BODY = 128 * 1024;
     private static final int AUTH_WINDOW_SECONDS = 60;
-    private static final boolean TRUST_PROXY = "1".equals(System.getenv("QWORK_TRUST_PROXY"));
+    private static final String CLIENT_IP_HEADER = switch (env("QWORK_TRUST_PROXY", "")) {
+        case "1" -> "X-Forwarded-For"; // Caddy overwrites this header.
+        case "render" -> "CF-Connecting-IP"; // Render's Cloudflare edge overwrites this header.
+        default -> null;
+    };
     private static final Semaphore AUTH_SLOTS = new Semaphore(4);
     private static final Semaphore API_SLOTS = new Semaphore(32);
     private static final Semaphore IMPORT_SLOTS = new Semaphore(2);
@@ -44,6 +49,8 @@ final class Main {
     private static final Pattern EMPLOYEE_PASSWORD = Pattern.compile("/employees/([0-9]{1,19})/reset-password");
     private static final Pattern TASK = Pattern.compile("/tasks/([0-9]{1,19})");
     private static final Pattern REPEAT = Pattern.compile("/tasks/([0-9]{1,19})/repeat");
+    private static final Pattern REPRESENTATIVE = Pattern.compile("/tasks/([0-9]{1,19})/representative");
+    private static final Pattern REPRESENTATIVE_PHOTO = Pattern.compile("/tasks/([0-9]{1,19})/representative/([0-9]{1,19})/photo");
     private static final Pattern PHOTOS = Pattern.compile("/tasks/([0-9]{1,19})/photos");
     private static final Pattern PHOTO = Pattern.compile("/tasks/([0-9]{1,19})/photos/([0-9]{1,19})");
     private static final Pattern PHOTO_REJECT = Pattern.compile("/tasks/([0-9]{1,19})/photos/([0-9]{1,19})/reject");
@@ -52,6 +59,7 @@ final class Main {
     private static final Pattern INCIDENT_ACTION = Pattern.compile("/incidents/([0-9]{1,19})/(decision|transfer)");
     private static final Pattern TASK_TRANSFER = Pattern.compile("/tasks/([0-9]{1,19})/transfer");
     private static final Pattern PLANNING_TEMPLATE = Pattern.compile("/planning/templates/([0-9]{1,19})");
+    private static final Pattern TRIP_ACTION = Pattern.compile("/trips/([0-9]{1,19})/(start|finish|report)");
 
     private record Attempts(long start, int count) {}
     private record Result(int status, Map<String, Object> body, byte[] image) {
@@ -69,6 +77,9 @@ final class Main {
                 }
             }
             return;
+        }
+        if (!env("RENDER_SERVICE_ID", "").isBlank() && !Db.postgres()) {
+            throw new IllegalStateException("Set QWORK_DATABASE_URL to PostgreSQL on Render.");
         }
         Db.initialize();
         var host = env("QWORK_HOST", "127.0.0.1");
@@ -129,6 +140,14 @@ final class Main {
                     asset(exchange, "/invite.js", "text/javascript; charset=utf-8");
                     return;
                 }
+                if ("GET".equals(method) && "/representative".equals(path)) {
+                    asset(exchange, "/representative.html", "text/html; charset=utf-8");
+                    return;
+                }
+                if ("GET".equals(method) && "/representative.js".equals(path)) {
+                    asset(exchange, "/representative.js", "text/javascript; charset=utf-8");
+                    return;
+                }
                 if ("GET".equals(method) && ("/verify-email".equals(path) || "/reset-password".equals(path))) {
                     asset(exchange, "/auth-mail.html", "text/html; charset=utf-8");
                     return;
@@ -144,7 +163,8 @@ final class Main {
                 try {
                     boolean post = "POST".equals(method);
                     boolean importing = post && ("/planning/import".equals(path) || "/planning/import/preview".equals(path));
-                    boolean photoRequest = post && ("/sync/events".equals(path) || PHOTOS.matcher(path).matches());
+                    boolean photoRequest = post && ("/sync/events".equals(path) || PHOTOS.matcher(path).matches()
+                        || "/representative/decision".equals(path));
                     Semaphore slots = importing ? IMPORT_SLOTS : photoRequest ? PHOTO_REQUEST_SLOTS : null;
                     if (slots != null && !slots.tryAcquire()) {
                         throw Domain.error(429, importing
@@ -183,6 +203,16 @@ final class Main {
                 Db.one(db, "SELECT 1 FROM companies LIMIT 1");
             }
             return ok(Map.of("ok", true));
+        }
+        if ("POST".equals(method) && Set.of("/representative/preview", "/representative/decision").contains(path)) {
+            limitAuthentication("representative:" + clientAddress(exchange));
+            boolean decision = "/representative/decision".equals(path);
+            var fields = payload(exchange, decision ? RepresentativeReviews.MAX_BODY : MAX_BODY);
+            try (var db = Db.connect(decision)) {
+                var response = decision ? RepresentativeReviews.decide(db, fields) : RepresentativeReviews.preview(db, fields);
+                if (decision) db.commit();
+                return ok(response);
+            }
         }
         if ("POST".equals(method) && Set.of("/auth/register", "/auth/login", "/auth/email/verify",
                 "/auth/password/request", "/auth/password/reset").contains(path)) {
@@ -226,16 +256,21 @@ final class Main {
         boolean write = ("POST".equals(method) && !"/planning/import/preview".equals(path)) || "PATCH".equals(method);
         var payload = switch (method + " " + path) {
             case "PATCH /auth/email" -> payload(exchange);
-            case "POST /employees", "POST /tasks", "POST /objects", "POST /shifts",
+            case "POST /tasks" -> payload(exchange, MAX_REPORT_BODY);
+            case "POST /employees", "POST /objects", "POST /shifts",
                  "POST /shifts/calendar", "POST /incidents", "POST /planning/templates",
-                 "POST /planning/assignment-settings" -> payload(exchange);
+                 "POST /planning/assignment-settings", "POST /field-work/defaults", "POST /trips",
+                 "POST /field-control/work-mode" -> payload(exchange);
             case "POST /planning/import", "POST /planning/import/preview" -> payload(exchange, MAX_IMPORT_BODY);
             case "POST /sync/events" -> payload(exchange, MAX_PHOTO_BODY);
             default -> {
+                if ("PATCH".equals(method) && TASK.matcher(path).matches()) {
+                    yield payload(exchange, MAX_REPORT_BODY);
+                }
                 if ("POST".equals(method) && PHOTOS.matcher(path).matches()) {
                     yield payload(exchange, MAX_PHOTO_BODY);
                 }
-                if (("PATCH".equals(method) && (TASK.matcher(path).matches() || PLANNING_TEMPLATE.matcher(path).matches()
+                if (("PATCH".equals(method) && (PLANNING_TEMPLATE.matcher(path).matches()
                             || EMPLOYEE_DEPARTMENT.matcher(path).matches()))
                         || ("POST".equals(method) && (REPEAT.matcher(path).matches() || PHOTO_REJECT.matcher(path).matches()
                             || SHIFT_ACTION.matcher(path).matches() || INCIDENT_ACTION.matcher(path).matches()
@@ -330,6 +365,12 @@ final class Main {
             case "POST /tasks": return created(Tasks.createTask(db, user, payload));
             case "GET /objects": return ok(Places.list(db, user));
             case "POST /objects": return created(Places.create(db, user, payload));
+            case "GET /field-work/defaults": return ok(FieldWork.defaults(db, user));
+            case "POST /field-work/defaults": return ok(FieldWork.saveDefault(db, user, payload));
+            case "GET /trips": return ok(Trips.list(db, user));
+            case "POST /trips": return created(Trips.create(db, user, payload));
+            case "GET /field-control": return ok(FieldControl.dashboard(db, user));
+            case "POST /field-control/work-mode": return ok(FieldControl.setWorkMode(db, user, payload));
             case "POST /sync/events": return ok(Sync.apply(db, user, payload));
             case "GET /sync/conflicts": return ok(Sync.conflicts(db, user));
             case "GET /shifts": return ok(Shift.list(db, user));
@@ -354,6 +395,24 @@ final class Main {
         var conflict = CONFLICT_RESOLVE.matcher(path);
         if ("POST".equals(method) && conflict.matches()) {
             return ok(Sync.resolve(db, user, conflict.group(1)));
+        }
+        var trip = TRIP_ACTION.matcher(path);
+        if (trip.matches()) {
+            long tripId = id(trip.group(1));
+            String action = trip.group(2);
+            if ("GET".equals(method) && "report".equals(action)) return ok(Trips.report(db, user, tripId));
+            if ("POST".equals(method) && !"report".equals(action)) return ok(Trips.act(db, user, tripId, action));
+        }
+        var representative = REPRESENTATIVE.matcher(path);
+        if (representative.matches()) {
+            long taskId = id(representative.group(1));
+            if ("GET".equals(method)) return ok(RepresentativeReviews.summary(db, user, taskId));
+            if ("POST".equals(method)) return created(RepresentativeReviews.issue(db, user, taskId));
+        }
+        var representativePhoto = REPRESENTATIVE_PHOTO.matcher(path);
+        if ("GET".equals(method) && representativePhoto.matches()) {
+            return new Result(200, null, RepresentativeReviews.photo(db, user,
+                id(representativePhoto.group(1)), id(representativePhoto.group(2))));
         }
         if ("POST".equals(method)) {
             var shift = SHIFT_ACTION.matcher(path);
@@ -454,8 +513,8 @@ final class Main {
     }
 
     private static String clientAddress(HttpExchange exchange) {
-        List<String> forwarded = exchange.getRequestHeaders().get("X-Forwarded-For");
-        if (TRUST_PROXY && forwarded != null && forwarded.size() == 1) {
+        List<String> forwarded = CLIENT_IP_HEADER == null ? null : exchange.getRequestHeaders().get(CLIENT_IP_HEADER);
+        if (forwarded != null && forwarded.size() == 1) {
             var value = forwarded.getFirst().strip();
             try {
                 if (value.contains(":") && value.matches("[0-9A-Fa-f:.]+")) {

@@ -83,8 +83,8 @@ final class Sync {
         String hash = payloadHash(taskId, kind, occurredAt, body);
         String requestedStatus = kind.equals("patch") ? preview(body.get("status")) : null;
         String photoKind = kind.equals("photo") ? preview(body.get("kind")) : null;
-        if (kind.equals("photo") && !Set.of("before", "after").contains(Objects.toString(photoKind, ""))) {
-            throw error(400, "Укажите вид фотографии «до» или «после».");
+        if (kind.equals("photo") && !Set.of("before", "after", "checklist").contains(Objects.toString(photoKind, ""))) {
+            throw error(400, "Укажите вид фотографии «до», «после» или «чек-лист».");
         }
 
         // Authorize before recording an event; authorize again after the mutation lock.

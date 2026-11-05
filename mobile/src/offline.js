@@ -20,15 +20,33 @@ function optimisticTasks(state) {
     if (event.issue) blocked.add(event.taskId);
     const task = byId.get(event.taskId);
     if (!task || blocked.has(event.taskId) || task.revision !== event.body.expectedRevision) continue;
-    const { status, checks, arrival, result } = event.body;
+    const { status, checks, checklist, arrival, result, outcome, position } = event.body;
     const optimistic = { ...task, revision: task.revision + 1, offlinePending: true };
     if (event.kind === 'photo') {
-      optimistic.photos = { ...task.photos, [event.body.kind]: 1 };
+      const { kind, pairKey = 'main' } = event.body;
+      if (kind === 'before' || kind === 'after') {
+        if (pairKey === 'main') optimistic.photos = { ...task.photos, [kind]: 1 };
+        if (task.photoPairs) {
+          optimistic.photoPairs = task.photoPairs.map(pair => pair.key === pairKey ? { ...pair, [kind]: true } : pair);
+        }
+      }
     } else {
       if (status !== undefined) optimistic.status = status;
       if (checks !== undefined) optimistic.checks = checks;
+      if (checklist !== undefined) optimistic.checklist = checklist;
       if (arrival !== undefined) optimistic.arrival = arrival;
       if (result !== undefined) optimistic.result = result;
+      if (outcome !== undefined) {
+        optimistic.outcome = outcome;
+        if (typeof outcome.work === 'string') optimistic.result = outcome.work;
+      }
+      if (status !== undefined && status !== task.status) {
+        optimistic.history = [...(task.history ?? []), {
+          status, createdAt: event.occurredAt, receivedAt: null,
+          position: position ?? (arrival?.latitude != null ? arrival : null),
+          reason: arrival?.reason,
+        }];
+      }
     }
     byId.set(task.id, optimistic);
   }
@@ -162,6 +180,8 @@ async function loadStore(scope) {
     return state.queue.filter(row => row.taskId === taskId && row.kind === 'photo').map(row => ({
       id: row.eventId, kind: row.body.kind, localUri: photo(row).uri, pending: true,
       caption: row.body.caption, capturedAt: row.body.capturedAt ?? row.occurredAt,
+      pairKey: row.body.pairKey ?? 'main', checklistId: row.body.checklistId,
+      latitude: row.body.latitude, longitude: row.body.longitude, accuracy: row.body.accuracy,
       issue: row.issue?.message,
     }));
   }

@@ -250,7 +250,8 @@ final class Mailer {
         }
         String apiKey = System.getenv().getOrDefault("QWORK_EMAIL_API_KEY", "").strip();
         String from = System.getenv().getOrDefault("QWORK_EMAIL_FROM", "").strip();
-        String publicUrl = System.getenv().getOrDefault("QWORK_PUBLIC_URL", "").strip().replaceFirst("/+$", "");
+        String publicUrl = System.getenv().getOrDefault("QWORK_PUBLIC_URL",
+            System.getenv().getOrDefault("RENDER_EXTERNAL_URL", "")).strip().replaceFirst("/+$", "");
         String endpoint = System.getenv().getOrDefault("QWORK_EMAIL_API_URL", provider.endpoint).strip();
         if (apiKey.isBlank() || from.isBlank() || publicUrl.isBlank()
                 || apiKey.length() > 4096 || from.length() > 1024

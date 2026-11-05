@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { EmployeeCamera, TaskPhotoGallery } from './TaskPhotos';
+import FieldReport, { CHECKLIST_OUTCOMES, DEFAULT_CHECKLIST_TITLES, PRIORITY_LABELS, RESULT_FIELDS } from './FieldReport';
 import { Icon } from './ui';
 
 const palette = {
@@ -27,14 +28,6 @@ const stageLabels = {
   cancelled: 'Отменена',
   repeated: 'Назначен повторный выезд',
 };
-const checklist = [
-  'Подтвердить безопасный доступ',
-  'Осмотреть оборудование',
-  'Выполнить работы по заданию',
-  'Проверить результат',
-  'Убрать рабочее место',
-];
-
 function Action({ children, onPress, disabled = false, secondary = false }) {
   return (
     <Pressable
@@ -68,21 +61,31 @@ function formatTime(value) {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString('ru-RU');
 }
 
-export function WorkScreens({ task, setTask, onBack, onLocate, onUploadPhoto, request, imageSource,
+export function WorkScreens({ task, setTask, onBack, onOpenTask, onLocate, onUploadPhoto, request, imageSource,
   galleryRevision = task.revision, busy = false }) {
   const [locating, setLocating] = useState(false);
   const [manualArrival, setManualArrival] = useState(false);
   const [arrivalReason, setArrivalReason] = useState('');
   const [arrivalError, setArrivalError] = useState('');
   const [result, setResult] = useState(task.result ?? '');
+  const [checklistDraft, setChecklistDraft] = useState(null);
+  const [outcomeDraft, setOutcomeDraft] = useState(null);
+  const [reportOpen, setReportOpen] = useState(false);
   const status = task.status ?? 'assigned';
   const stageIndex = stages.indexOf(status);
   const due = task.deadline ? formatTime(task.deadline) : task.due;
-  const checks = checklist.map((_, index) => Boolean(task.checks?.[index]));
+  const checks = DEFAULT_CHECKLIST_TITLES.map((_, index) => Boolean(task.checks?.[index]));
   const checkedCount = checks.filter(Boolean).length;
   const before = Boolean(task.photos?.before);
   const after = Boolean(task.photos?.after);
-  const ready = checkedCount === checklist.length && before && after;
+  const photoPairs = task.photoPairs?.length
+    ? task.photoPairs
+    : [{ key: 'main', label: 'Общий вид', before, after }];
+  const checklist = checklistDraft ?? task.checklist;
+  const outcome = outcomeDraft ?? { ...task.outcome, work: task.outcome?.work ?? task.result ?? '' };
+  const marked = checklist?.filter(item => item.status).length;
+  const ready = (checklist ? marked === checklist.length : checkedCount === checks.length)
+    && photoPairs.every(pair => pair.before && pair.after);
   const reportLocked = ['review', 'done'].includes(status);
 
   const update = (values) => setTask({ ...task, ...values });
@@ -92,6 +95,14 @@ export function WorkScreens({ task, setTask, onBack, onLocate, onUploadPhoto, re
     nextChecks[index] = !nextChecks[index];
     update({ checks: nextChecks });
   };
+  const editChecklist = (id, values) => {
+    setChecklistDraft(current => (current ?? task.checklist).map(item => item.id === id ? { ...item, ...values } : item));
+  };
+  const reportValues = () => ({
+    checklist: checklist.map(({ id, status: itemStatus, comment }) => ({ id, status: itemStatus ?? null, comment: (comment ?? '').trim() })),
+    outcome: Object.fromEntries(RESULT_FIELDS.map(([key]) => [key, (outcome[key] ?? '').trim()])),
+  });
+  const saveDraft = () => update(reportValues());
 
   const primaryAction = {
     assigned: ['Принять задачу', 'accepted'],
@@ -106,9 +117,9 @@ export function WorkScreens({ task, setTask, onBack, onLocate, onUploadPhoto, re
   if (!before && (status === 'arrived' || (onUploadPhoto && ['paused', 'rework'].includes(status)))) {
     actionHint = 'Добавьте фото «до», чтобы начать работу.';
   } else if (status === 'work' && !ready) {
-    actionHint = 'Заполните чек-лист и добавьте оба снимка.';
-  } else if (status === 'work' && !result.trim()) {
-    actionHint = 'Опишите результат работы.';
+    actionHint = 'Заполните чек-лист и добавьте снимки «до» и «после» для каждой пары.';
+  } else if (status === 'work' && !(checklist ? outcome.work : result).trim()) {
+    actionHint = 'Заполните поле «Что сделано».';
   }
   const actionDisabled = busy || locating || Boolean(actionHint)
     || (status === 'travel' && manualArrival && !arrivalReason.trim());
@@ -158,7 +169,8 @@ export function WorkScreens({ task, setTask, onBack, onLocate, onUploadPhoto, re
     if (status === 'rework') {
       changes.photos = { ...task.photos, after: 0 };
     } else if (nextStatus === 'review') {
-      changes.result = result.trim();
+      if (checklist) Object.assign(changes, reportValues());
+      else changes.result = result.trim();
     }
     return update(changes);
   };
@@ -179,6 +191,7 @@ export function WorkScreens({ task, setTask, onBack, onLocate, onUploadPhoto, re
           <View style={styles.heroTop}>
             <Text style={styles.eyebrow}>ЗАЯВКА №{task.id}</Text>
             <Text style={styles.badge}>{stageLabels[status] ?? 'Задание'}</Text>
+            {task.priority && <Text style={styles.badge}>Приоритет · {PRIORITY_LABELS[task.priority]}</Text>}
             {task.overdue ? <Text style={[styles.badge, styles.overdueBadge]}>Просрочена</Text> : null}
           </View>
           <Text accessibilityRole="header" style={styles.title}>{task.title}</Text>
@@ -194,10 +207,16 @@ export function WorkScreens({ task, setTask, onBack, onLocate, onUploadPhoto, re
                 <Text style={styles.metaValue}>{due}</Text>
               </View>
             ) : null}
-            {task.repeatOf ? (
+            {task.managerName ? (
               <View style={styles.metaItem}>
-                <View style={styles.metaLabel}><Icon name="link" color={palette.accent} size={16} /><Text style={styles.eyebrow}>Повторный выезд</Text></View>
-                <Text style={styles.metaValue}>По заявке №{task.repeatOf}</Text>
+                <View style={styles.metaLabel}><Icon name="user" color={palette.accent} size={16} /><Text style={styles.eyebrow}>Руководитель</Text></View>
+                <Text style={styles.metaValue}>{task.managerName}</Text>
+              </View>
+            ) : null}
+            {task.purpose ? (
+              <View style={styles.metaItem}>
+                <View style={styles.metaLabel}><Icon name="clipboard" color={palette.accent} size={16} /><Text style={styles.eyebrow}>Цель выезда</Text></View>
+                <Text style={styles.metaValue}>{task.purpose}</Text>
               </View>
             ) : null}
           </View>
@@ -211,6 +230,16 @@ export function WorkScreens({ task, setTask, onBack, onLocate, onUploadPhoto, re
               <Text style={styles.progressText}>Этап {stageIndex + 1} из {stages.length}</Text>
             </View>
           ) : null}
+          {task.repeatOf ? (
+            onOpenTask ? <Action secondary onPress={() => onOpenTask(task.repeatOf)}>Исходная заявка №{task.repeatOf}</Action>
+              : <Text style={styles.body}>Исходная заявка №{task.repeatOf}</Text>
+          ) : null}
+          {task.repeatTaskId ? (
+            onOpenTask ? <Action secondary onPress={() => onOpenTask(task.repeatTaskId)}>Повторный выезд №{task.repeatTaskId}</Action>
+              : <Text style={styles.body}>Повторный выезд №{task.repeatTaskId}</Text>
+          ) : null}
+          {task.repeatReason ? <Text style={styles.body}>Причина повторного выезда · {task.repeatReason}</Text> : null}
+          <Action secondary onPress={() => setReportOpen(true)}>Открыть отчёт по выезду</Action>
         </View>
 
         {task.description ? (
@@ -293,18 +322,24 @@ export function WorkScreens({ task, setTask, onBack, onLocate, onUploadPhoto, re
         {['arrived', 'work', 'paused', 'rework', 'review', 'done'].includes(status) && onUploadPhoto ? (
           <View style={styles.card}>
             <SectionHeading icon="camera">Фотоотчёт</SectionHeading>
-            <Text style={styles.photoState}>До работы · {before ? 'Добавлено' : 'Нет снимка'}</Text>
-            {!before && ['arrived', 'work', 'rework', 'paused'].includes(status) ? (
-              <EmployeeCamera kind="before" onLocate={onLocate} disabled={busy}
-                onUpload={fields => onUploadPhoto(task.id, fields)} />
-            ) : null}
-            <Text style={styles.photoState}>После работы · {after ? 'Добавлено' : 'Нет снимка'}</Text>
-            {!after && status === 'work' ? (
-              <EmployeeCamera kind="after" onLocate={onLocate} disabled={busy}
-                onUpload={fields => onUploadPhoto(task.id, fields)} />
-            ) : null}
+            {photoPairs.map(pair => (
+              <View key={pair.key} style={styles.checkItem}>
+                <Text style={styles.metaValue}>{pair.label}</Text>
+                <Text style={styles.photoState}>До работы · {pair.before ? 'Добавлено' : 'Нет снимка'}</Text>
+                {!pair.before && ['arrived', 'work', 'rework', 'paused'].includes(status) ? (
+                  <EmployeeCamera kind="before" pairKey={pair.key} onLocate={onLocate} disabled={busy}
+                    onUpload={fields => onUploadPhoto(task.id, fields)} />
+                ) : null}
+                <Text style={styles.photoState}>После работы · {pair.after ? 'Добавлено' : 'Нет снимка'}</Text>
+                {!pair.after && status === 'work' ? (
+                  <EmployeeCamera kind="after" pairKey={pair.key} onLocate={onLocate} disabled={busy}
+                    onUpload={fields => onUploadPhoto(task.id, fields)} />
+                ) : null}
+              </View>
+            ))}
             <TaskPhotoGallery taskId={task.id} request={request} imageSource={imageSource}
-              kinds={['before', 'after']} revision={galleryRevision} />
+              kinds={['before', 'after']} comparisonPairs={photoPairs} location={task.address || task.object}
+              revision={galleryRevision} />
           </View>
         ) : ['arrived', 'work', 'paused', 'review', 'done'].includes(status) && !onUploadPhoto ? (
           <View style={styles.card}>
@@ -321,11 +356,47 @@ export function WorkScreens({ task, setTask, onBack, onLocate, onUploadPhoto, re
           </View>
         ) : null}
 
-        {['work', 'paused', 'review', 'done'].includes(status) ? (
+        {checklist && ['work', 'paused', 'rework', 'review', 'done'].includes(status) ? (
           <View style={styles.card}>
             <SectionHeading icon="clipboard">Чек-лист работ</SectionHeading>
-            <Text style={styles.body}>{checkedCount} из {checklist.length} выполнено</Text>
-            {checklist.map((label, index) => (
+            <Text style={styles.body}>{marked} из {checklist.length} пунктов заполнено</Text>
+            {checklist.map(item => (
+              <View key={item.id} style={styles.checkItem}>
+                <Text style={styles.metaValue}>{item.title}</Text>
+                {status === 'work' ? (
+                  <>
+                    <View accessibilityRole="radiogroup" accessibilityLabel={item.title} style={styles.outcomes}>
+                      {Object.entries(CHECKLIST_OUTCOMES).map(([value, label]) => (
+                        <Pressable key={value} accessibilityRole="radio" accessibilityState={{ checked: item.status === value, disabled: busy }}
+                          disabled={busy} onPress={() => editChecklist(item.id, { status: value })}
+                          style={[styles.outcomeOption, item.status === value && styles.outcomeOptionSelected]}>
+                          <Text style={[styles.outcomeText, item.status === value && styles.outcomeTextSelected]}>{label}</Text>
+                        </Pressable>
+                      ))}
+                    </View>
+                    <TextInput accessibilityLabel={`Комментарий к пункту «${item.title}»`} placeholder="Комментарий"
+                      placeholderTextColor={palette.muted} editable={!busy} multiline maxLength={1000}
+                      style={[styles.input, styles.commentInput]} value={item.comment ?? ''}
+                      onChangeText={comment => editChecklist(item.id, { comment })} />
+                    {onUploadPhoto && <EmployeeCamera kind="checklist" checklistId={item.id}
+                      onLocate={onLocate} disabled={busy} onUpload={fields => onUploadPhoto(task.id, fields)} />}
+                  </>
+                ) : (
+                  <>
+                    <Text style={styles.body}>{CHECKLIST_OUTCOMES[item.status] || 'Без отметки'}</Text>
+                    {item.comment ? <Text style={styles.body}>{item.comment}</Text> : null}
+                  </>
+                )}
+              </View>
+            ))}
+            {onUploadPhoto && <TaskPhotoGallery taskId={task.id} request={request} imageSource={imageSource}
+              kinds={['checklist']} checklist={checklist} revision={galleryRevision} />}
+          </View>
+        ) : !checklist && ['work', 'paused', 'review', 'done'].includes(status) ? (
+          <View style={styles.card}>
+            <SectionHeading icon="clipboard">Чек-лист работ</SectionHeading>
+            <Text style={styles.body}>{checkedCount} из {checks.length} выполнено</Text>
+            {DEFAULT_CHECKLIST_TITLES.map((label, index) => (
               <Pressable
                 key={label}
                 accessibilityRole="checkbox"
@@ -343,7 +414,30 @@ export function WorkScreens({ task, setTask, onBack, onLocate, onUploadPhoto, re
           </View>
         ) : null}
 
-        {status === 'work' ? (
+        {status === 'work' && checklist ? (
+          <View style={styles.card}>
+            <SectionHeading icon="check">Итог выезда</SectionHeading>
+            {RESULT_FIELDS.map(([key, label, limit]) => (
+              <View key={key} style={styles.metaItem}>
+                <Text style={styles.metaValue}>{label}</Text>
+                <TextInput
+                  accessibilityLabel={label}
+                  placeholder={key === 'work' ? 'Кратко опишите выполненные работы' : 'Если применимо'}
+                  placeholderTextColor={palette.muted}
+                  editable={!busy && !locating}
+                  value={outcome[key] ?? ''}
+                  onChangeText={value => setOutcomeDraft(current => ({ ...(current ?? outcome), [key]: value }))}
+                  maxLength={limit}
+                  multiline
+                  style={[styles.input, styles.commentInput]}
+                />
+              </View>
+            ))}
+            <Action secondary disabled={busy || locating || !(checklistDraft || outcomeDraft)} onPress={saveDraft}>
+              Сохранить черновик
+            </Action>
+          </View>
+        ) : status === 'work' ? (
           <View style={styles.card}>
             <SectionHeading icon="check">Результат работы</SectionHeading>
             <TextInput
@@ -402,6 +496,9 @@ export function WorkScreens({ task, setTask, onBack, onLocate, onUploadPhoto, re
           </View>
         ) : null}
       </ScrollView>
+
+      {reportOpen && <FieldReport task={task} request={request} imageSource={imageSource}
+        revision={galleryRevision} onClose={() => setReportOpen(false)} />}
 
       {primaryAction ? (
         <View style={styles.footer}>
@@ -465,4 +562,11 @@ const styles = StyleSheet.create({
   checkbox: { width: 22, height: 22, borderWidth: 1, borderColor: '#BED1EA', borderRadius: 6, alignItems: 'center', justifyContent: 'center' },
   checkboxSelected: { borderColor: palette.accent, backgroundColor: palette.accent },
   checkText: { flex: 1, color: palette.ink, fontSize: 13, lineHeight: 18 },
+  checkItem: { gap: 8, paddingVertical: 8, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.line },
+  outcomes: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+  outcomeOption: { paddingHorizontal: 10, minHeight: 44, justifyContent: 'center', borderRadius: 10, backgroundColor: palette.canvas },
+  outcomeOptionSelected: { backgroundColor: palette.accent },
+  outcomeText: { fontSize: 12, color: palette.ink, fontWeight: '500' },
+  outcomeTextSelected: { color: palette.paper },
+  commentInput: { minHeight: 60, paddingVertical: 9, textAlignVertical: 'top' },
 });

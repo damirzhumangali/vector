@@ -15,8 +15,10 @@ import java.sql.SQLException;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
@@ -35,39 +37,59 @@ import static qwork.Domain.number;
 /** Company-scoped storage and verification of work photos. */
 final class Media {
     static final int MAX_IMAGE_BYTES = 12 * 1024 * 1024;
+    static final int MAX_REPRESENTATIVE_IMAGE_BYTES = 5 * 1024 * 1024;
     private static final int MAX_IMAGE_PIXELS = 16_000_000;
     private static final int MAX_IMAGE_EDGE = 16_383;
     private static final byte[] PNG_SIGNATURE = {(byte) 0x89, 'P', 'N', 'G', 13, 10, 26, 10};
     private static final String BIT_DEPTH_ERROR = "Для конвертации без потерь нужен снимок с глубиной цвета до 8 бит на канал.";
     private static final int MAX_PHOTOS = 32;
     private static final Semaphore IMAGE_SLOTS = new Semaphore(2);
-    private static final Set<String> KINDS = Set.of("material", "before", "after");
+    private static final Set<String> KINDS = Set.of("material", "before", "after", "checklist");
     private static final Set<String> CLOSED = Set.of("done", "cancelled", "repeated");
     private static final String COLUMNS = """
-        id, kind, caption, author_name, created_at, captured_at, latitude, longitude, accuracy,
-        sha256, width, height, rejected_reason, rejected_at
+        id, kind, caption, author_id, author_name, created_at, captured_at, latitude, longitude, accuracy,
+        sha256, width, height, rejected_reason, rejected_at, pair_key, checklist_id
         """;
 
-    static final String SQLITE_SCHEMA = """
+    private static final String SQLITE_CREATE_TABLE = """
         CREATE TABLE IF NOT EXISTS task_media (
             id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
             author_id INTEGER NOT NULL REFERENCES users(id), author_name TEXT NOT NULL,
-            kind TEXT NOT NULL CHECK (kind IN ('material', 'before', 'after')),
+            kind TEXT NOT NULL CHECK (kind IN ('material', 'before', 'after', 'checklist')),
             caption TEXT NOT NULL, created_at TEXT NOT NULL, captured_at TEXT NOT NULL,
             latitude REAL, longitude REAL, accuracy REAL, sha256 TEXT NOT NULL,
             width INTEGER NOT NULL, height INTEGER NOT NULL,
             original_image BLOB NOT NULL, display_image BLOB NOT NULL,
-            rejected_reason TEXT, rejected_at TEXT, rejected_by INTEGER REFERENCES users(id)
-        );
-        CREATE INDEX IF NOT EXISTS task_media_task ON task_media(task_id, id);
-        CREATE UNIQUE INDEX IF NOT EXISTS task_media_active_proof ON task_media(task_id, kind)
-            WHERE kind IN ('before', 'after') AND rejected_at IS NULL;
+            rejected_reason TEXT, rejected_at TEXT, rejected_by INTEGER REFERENCES users(id),
+            pair_key TEXT NOT NULL DEFAULT 'main', checklist_id TEXT
+        )
         """;
+    static final String SQLITE_SCHEMA = SQLITE_CREATE_TABLE + ";";
 
     private record Position(Double latitude, Double longitude, Double accuracy) {}
     private record Picture(byte[] original, byte[] display, int width, int height) {}
 
     private Media() {}
+
+    static void upgradeSqlite(Connection db) throws SQLException {
+        var columns = Db.rows(db, "PRAGMA table_info(task_media)");
+        if (columns.stream().noneMatch(column -> "pair_key".equals(column.get("name")))) {
+            Db.update(db, "ALTER TABLE task_media RENAME TO task_media_legacy");
+            Db.update(db, SQLITE_CREATE_TABLE);
+            String originalColumns = """
+                id, task_id, author_id, author_name, kind, caption, created_at, captured_at,
+                latitude, longitude, accuracy, sha256, width, height, original_image, display_image,
+                rejected_reason, rejected_at, rejected_by
+                """;
+            Db.update(db, "INSERT INTO task_media(" + originalColumns + ") SELECT " + originalColumns + " FROM task_media_legacy");
+            Db.update(db, "DROP TABLE task_media_legacy");
+        }
+        Db.update(db, "CREATE INDEX IF NOT EXISTS task_media_task ON task_media(task_id, id)");
+        Db.update(db, """
+            CREATE UNIQUE INDEX IF NOT EXISTS task_media_active_proof ON task_media(task_id, kind, pair_key)
+            WHERE kind IN ('before', 'after') AND rejected_at IS NULL
+            """);
+    }
 
     static Map<String, Object> list(Connection db, Map<String, Object> user, long taskId) throws SQLException {
         task(db, user, taskId);
@@ -75,14 +97,33 @@ final class Media {
     }
 
     static List<Map<String, Object>> listPhotos(Connection db, long taskId) throws SQLException {
-        return Db.rows(db, "SELECT " + COLUMNS + " FROM task_media WHERE task_id = ? ORDER BY id", taskId)
-            .stream().map(Media::metadata).toList();
+        var task = Db.one(db, "SELECT location FROM tasks WHERE id = ?", taskId);
+        Object location = task == null ? null : task.get("location");
+        var rows = Db.rows(db, "SELECT " + COLUMNS + " FROM task_media WHERE task_id = ? ORDER BY id", taskId);
+        var photos = new ArrayList<Map<String, Object>>(rows.size());
+        for (var row : rows) photos.add(metadata(row, location));
+        return photos;
     }
 
     static boolean hasAccepted(Connection db, long taskId, String kind) throws SQLException {
+        return hasAccepted(db, taskId, kind, FieldWork.MAIN_PAIR);
+    }
+
+    static boolean hasAccepted(Connection db, long taskId, String kind, String pairKey) throws SQLException {
         return Db.one(db, """
-            SELECT id FROM task_media WHERE task_id = ? AND kind = ? AND rejected_at IS NULL
-            """, taskId, kind) != null;
+            SELECT id FROM task_media WHERE task_id = ? AND kind = ? AND pair_key = ? AND rejected_at IS NULL
+            """, taskId, kind, pairKey) != null;
+    }
+
+    static Map<String, Set<String>> activeProofs(Connection db, long taskId) throws SQLException {
+        var result = new LinkedHashMap<String, Set<String>>();
+        for (var row : Db.rows(db, """
+            SELECT pair_key, kind FROM task_media
+            WHERE task_id = ? AND rejected_at IS NULL AND kind IN ('before', 'after')
+            """, taskId)) {
+            result.computeIfAbsent((String) row.get("pair_key"), key -> new HashSet<>()).add((String) row.get("kind"));
+        }
+        return result;
     }
 
     static Map<String, Object> upload(Connection db, Map<String, Object> user, long taskId,
@@ -104,12 +145,29 @@ final class Media {
             throw error(409, "Отметьте возвращение, прежде чем продолжить работу.");
         }
         checkUploadState(user, task, kind);
+        boolean proof = kind.equals("before") || kind.equals("after");
+        String pairKey = FieldWork.MAIN_PAIR;
+        String checklistId = null;
+        if (proof) {
+            pairKey = FieldWork.key(payload.getOrDefault("pairKey", FieldWork.MAIN_PAIR),
+                "Проверьте идентификатор пары фотографий.");
+            String selected = pairKey;
+            if (FieldWork.photoPairs(task).stream().noneMatch(pair -> selected.equals(pair.get("key")))) {
+                throw error(400, "Эта пара фотографий не указана в задании.");
+            }
+        } else if (kind.equals("checklist")) {
+            checklistId = FieldWork.key(payload.get("checklistId"), "Укажите пункт чек-листа для фотографии.");
+            String selected = checklistId;
+            if (FieldWork.checklist(task).stream().noneMatch(item -> selected.equals(item.get("id")))) {
+                throw error(400, "Пункт чек-листа не найден.");
+            }
+        }
         long count = number(Db.one(db, "SELECT COUNT(*) AS total FROM task_media WHERE task_id = ?", taskId), "total");
         if (count >= MAX_PHOTOS) {
             throw error(409, "В заявке достигнут предел количества фотографий.");
         }
-        if (!material && hasAccepted(db, taskId, kind)) {
-            throw error(409, "Фото этого вида уже прикреплено.");
+        if (proof && hasAccepted(db, taskId, kind, pairKey)) {
+            throw error(409, "Фото этого вида уже прикреплено к паре.");
         }
         byte[] input = decode(payload.get("imageBase64"));
         if (!IMAGE_SLOTS.tryAcquire()) {
@@ -117,23 +175,28 @@ final class Media {
         }
         Picture photo;
         try {
-            photo = process(input, material, name, capturedAt, position);
+            photo = process(input, material, name, capturedAt, position, true);
         } finally {
             IMAGE_SLOTS.release();
         }
         long id = Db.insert(db, """
             INSERT INTO task_media(task_id, author_id, author_name, kind, caption, created_at, captured_at,
-                latitude, longitude, accuracy, sha256, width, height, original_image, display_image)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                latitude, longitude, accuracy, sha256, width, height, original_image, display_image, pair_key, checklist_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, taskId, number(user, "id"), name, kind, caption, now.toString(), capturedAt,
             position.latitude(), position.longitude(), position.accuracy(), sha256(photo.original()),
-            photo.width(), photo.height(), photo.original(), photo.display());
+            photo.width(), photo.height(), photo.original(), photo.display(), pairKey, checklistId);
         if (!material) {
-            // Keep the original task response counters compatible with older clients.
-            String column = kind.equals("before") ? "photo_before" : "photo_after";
-            Db.update(db, "UPDATE tasks SET " + column + " = 1, revision = revision + 1 WHERE id = ?", taskId);
+            if (proof && FieldWork.MAIN_PAIR.equals(pairKey)) {
+                // Keep the original task response counters compatible with older clients.
+                String column = kind.equals("before") ? "photo_before" : "photo_after";
+                Db.update(db, "UPDATE tasks SET " + column + " = 1, revision = revision + 1 WHERE id = ?", taskId);
+            } else {
+                Db.update(db, "UPDATE tasks SET revision = revision + 1 WHERE id = ?", taskId);
+            }
         }
-        return Map.of("photo", metadata(Db.one(db, "SELECT " + COLUMNS + " FROM task_media WHERE id = ?", id)));
+        return Map.of("photo", metadata(Db.one(db, "SELECT " + COLUMNS + " FROM task_media WHERE id = ?", id),
+            task.get("location")));
     }
 
     static byte[] read(Connection db, Map<String, Object> user, long taskId, long photoId,
@@ -165,18 +228,27 @@ final class Media {
         String now = Instant.now().toString();
         Db.update(db, "UPDATE task_media SET rejected_reason = ?, rejected_at = ?, rejected_by = ? WHERE id = ?",
             reason, now, number(user, "id"), photoId);
-        String column = kind.equals("before") ? "photo_before" : "photo_after";
-        Db.update(db, "UPDATE tasks SET status = 'rework', rework_reason = ?, " + column +
-            " = 0, revision = revision + 1 WHERE id = ?", reason, taskId);
         if (kind.equals("before")) {
-            invalidateAfter(db, taskId, user);
+            Db.update(db, """
+                UPDATE task_media SET rejected_reason = ?, rejected_at = ?, rejected_by = ?
+                WHERE task_id = ? AND kind = 'after' AND pair_key = ? AND rejected_at IS NULL
+                """, "Снимок требуется обновить после доработки.", now, number(user, "id"), taskId, photo.get("pair_key"));
         }
-        String label = kind.equals("before") ? "Фото «до»" : "Фото «после»";
         Db.update(db, """
-            INSERT INTO task_events(task_id, status, actor_id, actor_name, created_at, reason, position)
-            VALUES (?, 'rework', ?, ?, ?, ?, NULL)
-            """, taskId, number(user, "id"), user.get("name"), now, label + ": " + reason);
-        return Map.of("photo", metadata(Db.one(db, "SELECT " + COLUMNS + " FROM task_media WHERE id = ?", photoId)));
+            UPDATE tasks SET status = 'rework', rework_reason = ?, photo_before = ?, photo_after = ?,
+                revision = revision + 1 WHERE id = ?
+            """, reason, hasAccepted(db, taskId, "before") ? 1 : 0, hasAccepted(db, taskId, "after") ? 1 : 0, taskId);
+        String label = switch (kind) {
+            case "before" -> "Фото «до»";
+            case "after" -> "Фото «после»";
+            default -> "Фото пункта чек-листа";
+        };
+        Db.update(db, """
+            INSERT INTO task_events(task_id, status, actor_id, actor_name, created_at, reason, position, received_at)
+            VALUES (?, 'rework', ?, ?, ?, ?, NULL, ?)
+            """, taskId, number(user, "id"), user.get("name"), now, label + ": " + reason, now);
+        return Map.of("photo", metadata(Db.one(db, "SELECT " + COLUMNS + " FROM task_media WHERE id = ?", photoId),
+            task.get("location")));
     }
 
     static void invalidateAfter(Connection db, long taskId, Map<String, Object> reviewer) throws SQLException {
@@ -188,7 +260,7 @@ final class Media {
     }
 
     private static Map<String, Object> task(Connection db, Map<String, Object> user, long id) throws SQLException {
-        var row = Db.one(db, "SELECT status, assignee_id FROM tasks WHERE id = ? AND company_id = ?",
+        var row = Db.one(db, "SELECT status, assignee_id, checks, checklist, photo_pairs, location FROM tasks WHERE id = ? AND company_id = ?",
             id, number(user, "company_id"));
         if (row == null || ("employee".equals(user.get("role"))
             && (number(row, "assignee_id") != number(user, "id") || "unassigned".equals(row.get("status"))))) {
@@ -217,17 +289,21 @@ final class Media {
         }
     }
 
-    private static Map<String, Object> metadata(Map<String, Object> row) {
+    private static Map<String, Object> metadata(Map<String, Object> row, Object location) throws SQLException {
         var result = new LinkedHashMap<String, Object>();
         result.put("id", String.valueOf(row.get("id")));
         for (String key : List.of("kind", "caption", "latitude", "longitude", "accuracy", "sha256", "width", "height")) {
             result.put(key, row.get(key));
         }
         result.put("authorName", row.get("author_name"));
+        result.put("authorId", row.get("author_id").toString());
         result.put("createdAt", row.get("created_at"));
         result.put("capturedAt", row.get("captured_at"));
         result.put("rejectedReason", row.get("rejected_reason"));
         result.put("rejectedAt", row.get("rejected_at"));
+        result.put("pairKey", row.get("pair_key"));
+        result.put("checklistId", row.get("checklist_id"));
+        result.putAll(FieldWork.photoGeofence(location, row));
         return result;
     }
 
@@ -270,8 +346,13 @@ final class Media {
     }
 
     private static byte[] decode(Object value) {
-        if (!(value instanceof String base64) || base64.length() > ((MAX_IMAGE_BYTES + 2) / 3) * 4) {
-            throw error(400, "Прикрепите JPEG или PNG размером до 12 МБ.");
+        return decode(value, MAX_IMAGE_BYTES);
+    }
+
+    private static byte[] decode(Object value, int maxBytes) {
+        String limit = maxBytes / (1024 * 1024) + " МБ.";
+        if (!(value instanceof String base64) || base64.length() > ((maxBytes + 2) / 3) * 4) {
+            throw error(400, "Прикрепите JPEG или PNG размером до " + limit);
         }
         byte[] data;
         try {
@@ -283,8 +364,8 @@ final class Media {
             && data[data.length - 2] == (byte) 0xff && data[data.length - 1] == (byte) 0xd9;
         boolean png = data.length >= 33 && Arrays.equals(data, 0, PNG_SIGNATURE.length,
             PNG_SIGNATURE, 0, PNG_SIGNATURE.length);
-        if (data.length > MAX_IMAGE_BYTES || !(jpeg || png)) {
-            throw error(400, "Прикрепите корректный JPEG или PNG размером до 12 МБ.");
+        if (data.length > maxBytes || !(jpeg || png)) {
+            throw error(400, "Прикрепите корректный JPEG или PNG размером до " + limit);
         }
         if (png) {
             validatePng(data);
@@ -314,7 +395,24 @@ final class Media {
         throw error(400, "Фотография повреждена.");
     }
 
-    private static Picture process(byte[] input, boolean material, String author, String capturedAt, Position position) {
+    static byte[] representativePhoto(Map<String, Object> payload) {
+        byte[] input = decode(payload.get("imageBase64"), MAX_REPRESENTATIVE_IMAGE_BYTES);
+        if (!IMAGE_SLOTS.tryAcquire()) {
+            throw error(429, "Сервер обрабатывает другие фотографии. Попробуйте ещё раз.");
+        }
+        try {
+            byte[] display = process(input, true, "", "", null, false).display();
+            if (display.length > MAX_REPRESENTATIVE_IMAGE_BYTES) {
+                throw error(400, "Фотография слишком большая. Снимите её с меньшим разрешением.");
+            }
+            return display;
+        } finally {
+            IMAGE_SLOTS.release();
+        }
+    }
+
+    private static Picture process(byte[] input, boolean material, String author, String capturedAt, Position position,
+                                   boolean keepOriginal) {
         try (var stream = new MemoryCacheImageInputStream(new ByteArrayInputStream(input))) {
             var readers = ImageIO.getImageReaders(stream);
             if (!readers.hasNext()) {
@@ -344,7 +442,7 @@ final class Media {
                     if (!material) {
                         validateQuality(image);
                     }
-                    byte[] original = LosslessWebp.encode(image);
+                    byte[] original = keepOriginal ? LosslessWebp.encode(image) : null;
                     byte[] display = material ? jpeg(image) : watermarked(image, author, capturedAt, position);
                     return new Picture(original, display, image.getWidth(), image.getHeight());
                 } finally {

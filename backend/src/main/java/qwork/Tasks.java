@@ -25,8 +25,11 @@ final class Tasks {
     private static final Set<String> CLOSED = Set.of("done", "cancelled", "repeated");
     private static final Set<String> REPEATABLE = Set.of("done", "cancelled", "review", "rework", "paused");
     private static final String TASK_SELECT = """
-        SELECT t.*, u.name AS assignee_name
+        SELECT t.*, u.name AS assignee_name, m.name AS manager_name, r.id AS repeat_task_id,
+            r.repeat_reason AS next_repeat_reason
         FROM tasks AS t JOIN users AS u ON u.id = t.assignee_id
+        LEFT JOIN users AS m ON m.id = t.manager_id AND m.company_id = t.company_id
+        LEFT JOIN tasks AS r ON r.repeat_of = t.id AND r.company_id = t.company_id
         """;
 
     private Tasks() {}
@@ -53,11 +56,18 @@ final class Tasks {
         String description = field(payload, "description", "Описание", 2000, true);
         long assignee = findAssignee(db, user, payload);
         String deadline = timestamp(payload.get("deadline"), "Срок");
+        long company = number(user, "company_id");
+        Long manager = FieldWork.assignedManager(db, company, place.objectId(), assignee, payload);
+        String purpose = field(payload, "purpose", "Цель выезда", 1000, true);
+        int priority = FieldWork.priority(payload);
+        String checklist = payload.containsKey("checklist") ? encode(FieldWork.newChecklist(payload.get("checklist"))) : null;
+        String pairs = payload.containsKey("photoPairs") ? encode(FieldWork.newPhotoPairs(payload.get("photoPairs"))) : null;
         long id = Db.insert(db, """
-            INSERT INTO tasks(company_id, assignee_id, title, object, address, description, location, deadline, object_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, number(user, "company_id"), assignee, title, place.name(), place.address(), description,
-            encode(place.location()), deadline, place.objectId());
+            INSERT INTO tasks(company_id, assignee_id, title, object, address, description, location, deadline, object_id,
+                purpose, priority, manager_id, checklist, photo_pairs)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, company, assignee, title, place.name(), place.address(), description,
+            encode(place.location()), deadline, place.objectId(), purpose, priority, manager, checklist, pairs);
         recordEvent(db, id, user, "assigned", "", null);
         return taskResponse(db, user, id);
     }
@@ -82,15 +92,25 @@ final class Tasks {
             throw error(409, "Для этой заявки уже создан повторный выезд.");
         }
         String deadline = timestamp(payload.get("deadline"), "Срок");
-        String reason = field(payload, "reason", "Причина повторного выезда", 1000, true);
+        String reason = field(payload, "reason", "Причина повторного выезда", 1000, false);
+        long company = number(user, "company_id");
+        Object manager = payload.containsKey("managerId")
+            ? FieldWork.manager(db, company, payload.get("managerId"))
+            : task.get("manager_id");
+        String checklist = task.get("checklist") == null ? null
+            : encode(FieldWork.freshChecklist(FieldWork.checklist(task)));
         long repeat = Db.insert(db, """
-            INSERT INTO tasks(company_id, assignee_id, title, object, address, description, location, deadline, repeat_of, object_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, number(user, "company_id"), assignee, task.get("title"), task.get("object"),
-            task.get("address"), task.get("description"), task.get("location"), deadline, id, task.get("object_id"));
+            INSERT INTO tasks(company_id, assignee_id, title, object, address, description, location, deadline, repeat_of, object_id,
+                purpose, priority, manager_id, checklist, photo_pairs, repeat_reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, company, assignee, task.get("title"), task.get("object"),
+            task.get("address"), task.get("description"), task.get("location"), deadline, id, task.get("object_id"),
+            task.get("purpose"), task.get("priority"), manager, checklist, task.get("photo_pairs"), reason);
         if (!CLOSED.contains(status)) {
             Db.update(db, "UPDATE tasks SET status = 'repeated', revision = revision + 1 WHERE id = ?", id);
             recordEvent(db, id, user, "repeated", reason, null);
+        } else {
+            Db.update(db, "UPDATE tasks SET revision = revision + 1 WHERE id = ?", id);
         }
         recordEvent(db, repeat, user, "assigned", reason, null);
         return Map.of("task", taskJson(db, getTask(db, user, repeat)),
@@ -116,6 +136,15 @@ final class Tasks {
             Accounts.requireReviewer(user);
         }
         String oldStatus = (String) task.get("status");
+        if (payload.containsKey("managerId")) {
+            Accounts.requireDispatcher(user);
+            if (CLOSED.contains(oldStatus) || payload.containsKey("status")) {
+                throw error(409, "Назначьте руководителя в открытой заявке отдельным действием.");
+            }
+            Long manager = FieldWork.manager(db, number(user, "company_id"), payload.get("managerId"));
+            Db.update(db, "UPDATE tasks SET manager_id = ?, revision = revision + 1 WHERE id = ?", manager, id);
+            return taskResponse(db, user, id);
+        }
         if (!employee && "cancelled".equals(payload.get("status"))) {
             if (CLOSED.contains(oldStatus)) {
                 throw error(409, "Эта заявка уже закрыта.");
@@ -135,17 +164,24 @@ final class Tasks {
             """, number(user, "company_id"), id) != null) {
             throw error(409, "По заявке ожидается ответ на аварийное назначение.");
         }
-        Changes changes = employee ? employeeChanges(db, id, task, payload) : reviewChanges(task, payload);
+        Changes changes = employee ? employeeChanges(db, id, task, payload) : reviewChanges(db, id, task, payload);
         String status = changes.status();
         if (!employee && status.equals("rework")) {
             Media.invalidateAfter(db, id, user);
         }
-        String result = (String) task.get("result");
+        var previousOutcome = FieldWork.outcome(task);
+        var outcome = employee ? FieldWork.changeOutcome(previousOutcome, payload) : previousOutcome;
+        if (!outcome.equals(previousOutcome) && !oldStatus.equals("work")) {
+            throw error(409, "Результат можно заполнить в процессе работы.");
+        }
+        String result = (String) outcome.get("work");
+        if (status.equals("review") && result.isBlank()) {
+            throw error(400, "Заполните поле «Выполненные работы».");
+        }
         String arrival = (String) task.get("arrival");
         String eventReason = status.equals("rework") ? changes.reason() : "";
         Map<String, Object> position = null;
         if (employee) {
-            result = employeeResult(payload, oldStatus, status, result);
             if (!status.equals(oldStatus)) {
                 if (status.equals("arrived")) {
                     var arrivalData = arrivalFrom(task, payload.get("arrival"));
@@ -160,17 +196,17 @@ final class Tasks {
             }
         }
         Db.update(db, """
-            UPDATE tasks SET status = ?, checks = ?, photo_before = ?, photo_after = ?,
-                rework_reason = ?, arrival = ?, result = ?, revision = revision + 1 WHERE id = ?
-            """, status, encode(changes.checks()), changes.before(), changes.after(),
-            changes.reason(), arrival, result, id);
+            UPDATE tasks SET status = ?, checks = ?, checklist = ?, photo_before = ?, photo_after = ?,
+                rework_reason = ?, arrival = ?, result = ?, outcome = ?, revision = revision + 1 WHERE id = ?
+            """, status, encode(FieldWork.legacyChecks(changes.checklist())), encode(changes.checklist()),
+            changes.before(), changes.after(), changes.reason(), arrival, result, encode(outcome), id);
         if (!status.equals(oldStatus)) {
             recordEvent(db, id, user, status, eventReason, position, occurredAt);
         }
         return taskResponse(db, user, id);
     }
 
-    private record Changes(String status, List<?> checks, long before, long after, String reason) {}
+    private record Changes(String status, List<Map<String, Object>> checklist, long before, long after, String reason) {}
 
     private static Changes employeeChanges(Connection db, long id, Map<String, Object> task, Map<String, Object> payload) throws Exception {
         String oldStatus = (String) task.get("status");
@@ -183,52 +219,41 @@ final class Tasks {
             throw error(409, "Отправленный отчёт защищён от изменений.");
         }
 
-        var originalChecks = readChecks(task);
-        Object checkInput = payload.getOrDefault("checks", originalChecks);
-        if (!(checkInput instanceof List<?> checks) || checks.size() != 5 ||
-            !checks.stream().allMatch(Boolean.class::isInstance)) {
-            throw error(400, "Чек-лист должен содержать пять отметок.");
-        }
-        if (!checks.equals(originalChecks) && !oldStatus.equals("work")) {
+        var originalChecklist = FieldWork.checklist(task);
+        var checklist = FieldWork.changeChecklist(originalChecklist, payload);
+        if (!checklist.equals(originalChecklist) && !oldStatus.equals("work")) {
             throw error(409, "Чек-лист доступен после начала работ.");
         }
-        long before = Media.hasAccepted(db, id, "before") ? 1 : 0;
-        long after = Media.hasAccepted(db, id, "after") ? 1 : 0;
-        if (status.equals("work") && !oldStatus.equals("work") && before == 0) {
+        var proofs = Media.activeProofs(db, id);
+        var main = proofs.getOrDefault(FieldWork.MAIN_PAIR, Set.of());
+        var pairs = FieldWork.photoPairs(task);
+        long before = main.contains("before") ? 1 : 0;
+        long after = main.contains("after") ? 1 : 0;
+        boolean allBefore = pairs.stream().allMatch(pair -> proofs.getOrDefault(pair.get("key"), Set.of()).contains("before"));
+        if (status.equals("work") && !oldStatus.equals("work") && !allBefore) {
             throw error(409, "Перед началом работы добавьте фото «до».");
         }
-        if (status.equals("review") &&
-            (before == 0 || after == 0 || !checks.stream().allMatch(Boolean.TRUE::equals))) {
+        boolean allAfter = pairs.stream().allMatch(pair -> proofs.getOrDefault(pair.get("key"), Set.of()).contains("after"));
+        if (status.equals("review") && (!allBefore || !allAfter
+            || checklist.stream().anyMatch(item -> item.get("status") == null))) {
             throw error(409, "Перед отправкой заполните чек-лист и фотоотчёт.");
         }
-        return new Changes(status, checks, before, after, (String) task.get("rework_reason"));
+        return new Changes(status, checklist, before, after, (String) task.get("rework_reason"));
     }
 
-    private static Changes reviewChanges(Map<String, Object> task, Map<String, Object> payload) throws Exception {
+    private static Changes reviewChanges(Connection db, long id, Map<String, Object> task,
+                                         Map<String, Object> payload) throws Exception {
         Object requested = payload.get("status");
-        if (!"review".equals(task.get("status")) || !("done".equals(requested) || "rework".equals(requested))) {
+        boolean ordinary = "review".equals(task.get("status")) && ("done".equals(requested) || "rework".equals(requested));
+        boolean afterRemark = "done".equals(task.get("status")) && "rework".equals(requested)
+            && RepresentativeReviews.hasCurrentRemark(db, id);
+        if (!ordinary && !afterRemark) {
             throw error(409, "Решение доступно для заявки на проверке.");
         }
         String reason = "rework".equals(requested)
             ? field(payload, "reworkReason", "Причина доработки", 1000, false) : "";
-        return new Changes((String) requested, readChecks(task),
+        return new Changes((String) requested, FieldWork.checklist(task),
                            number(task, "photo_before"), "rework".equals(requested) ? 0 : number(task, "photo_after"), reason);
-    }
-
-    private static String employeeResult(Map<String, Object> payload, String previous, String status, String result) {
-        if (status.equals("review")) {
-            if (!payload.containsKey("result")) {
-                return field(Map.of("result", result), "result", "Результат работы", 2000, false);
-            }
-            return field(payload, "result", "Результат работы", 2000, false);
-        }
-        if (payload.containsKey("result")) {
-            if (!previous.equals("work")) {
-                throw error(409, "Результат можно заполнить в процессе работы.");
-            }
-            return field(payload, "result", "Результат работы", 2000, true);
-        }
-        return result;
     }
 
     private static boolean isInteger(Object value) {
@@ -257,7 +282,7 @@ final class Tasks {
         return number(assignee, "id");
     }
 
-    private static Map<String, Object> getTask(Connection db, Map<String, Object> user, long id) throws SQLException {
+    static Map<String, Object> getTask(Connection db, Map<String, Object> user, long id) throws SQLException {
         var task = Db.one(db, TASK_SELECT + " WHERE t.company_id = ? AND t.id = ?", number(user, "company_id"), id);
         if (task == null || ("employee".equals(user.get("role"))
             && (number(task, "assignee_id") != number(user, "id") || "unassigned".equals(task.get("status"))))) {
@@ -275,6 +300,7 @@ final class Tasks {
         var history = new ArrayList<Map<String, Object>>(events.size());
         for (var event : events) {
             var item = new LinkedHashMap<String, Object>();
+            item.put("id", event.get("id").toString());
             item.put("status", event.get("status"));
             item.put("actorId", event.get("actor_id").toString());
             item.put("actorName", event.get("actor_name"));
@@ -288,19 +314,30 @@ final class Tasks {
         String deadline = (String) row.get("deadline");
         var task = new LinkedHashMap<String, Object>();
         task.put("id", row.get("id").toString());
-        for (String key : List.of("title", "object", "address", "description", "status", "revision", "result")) {
+        for (String key : List.of("title", "object", "address", "description", "status", "revision", "result",
+            "purpose", "priority")) {
             task.put(key, row.get(key));
         }
         task.put("checks", readChecks(row));
+        task.put("checklist", FieldWork.checklist(row));
+        task.put("outcome", FieldWork.outcome(row));
         String status = (String) row.get("status");
         boolean historical = status.equals("review") || CLOSED.contains(status);
         long taskId = number(row, "id");
+        var proofs = Media.activeProofs(db, taskId);
+        var main = proofs.getOrDefault(FieldWork.MAIN_PAIR, Set.of());
         task.put("photos", historical
             ? Map.of("before", row.get("photo_before"), "after", row.get("photo_after"))
-            : Map.of("before", Media.hasAccepted(db, taskId, "before") ? 1 : 0,
-                     "after", Media.hasAccepted(db, taskId, "after") ? 1 : 0));
+            : Map.of("before", main.contains("before") ? 1 : 0, "after", main.contains("after") ? 1 : 0));
+        task.put("photoPairs", FieldWork.photoPairs(row).stream().map(pair -> {
+            var active = proofs.getOrDefault(pair.get("key"), Set.of());
+            return Map.of("key", pair.get("key"), "label", pair.get("label"),
+                "before", active.contains("before"), "after", active.contains("after"));
+        }).toList());
         task.put("assigneeId", row.get("assignee_id").toString());
         task.put("assigneeName", row.get("assignee_name"));
+        task.put("managerId", Objects.toString(row.get("manager_id"), null));
+        task.put("managerName", row.get("manager_name"));
         task.put("reworkReason", row.get("rework_reason"));
         task.put("objectId", Objects.toString(row.get("object_id"), null));
         task.put("location", decode(row.get("location")));
@@ -308,9 +345,23 @@ final class Tasks {
         task.put("overdue", overdue(deadline, (String) row.get("status"), events));
         task.put("arrival", decode(row.get("arrival")));
         task.put("repeatOf", Objects.toString(row.get("repeat_of"), null));
+        task.put("repeatTaskId", Objects.toString(row.get("repeat_task_id"), null));
+        task.put("repeatReason", repeatReason(row, events));
+        task.put("nextRepeatReason", row.get("next_repeat_reason"));
         task.put("cancelReason", row.get("cancel_reason"));
+        task.put("representativeDecision", RepresentativeReviews.currentDecision(db, taskId));
         task.put("history", history);
         return task;
+    }
+
+    private static String repeatReason(Map<String, Object> row, List<Map<String, Object>> events) {
+        if (row.get("repeat_of") == null) {
+            return Objects.toString(row.get("next_repeat_reason"), "");
+        }
+        String reason = Objects.toString(row.get("repeat_reason"), "");
+        if (!reason.isBlank()) return reason;
+        return events.stream().filter(event -> "assigned".equals(event.get("status")))
+            .findFirst().map(event -> Objects.toString(event.get("reason"), "")).orElse("");
     }
 
     private static boolean overdue(String deadline, String status, List<Map<String, Object>> events) {
@@ -409,13 +460,9 @@ final class Tasks {
         var position = positionFrom(value);
         if (savedLocation != null) {
             Map<String, Object> location = Db.JSON.readValue(savedLocation.toString(), new TypeReference<>() {});
-            double lat1 = Math.toRadians(((Number) location.get("latitude")).doubleValue());
-            double lat2 = Math.toRadians(((Number) position.get("latitude")).doubleValue());
-            double lon = Math.toRadians(((Number) position.get("longitude")).doubleValue()
-                - ((Number) location.get("longitude")).doubleValue());
-            double a = Math.pow(Math.sin((lat2 - lat1) / 2), 2)
-                + Math.cos(lat1) * Math.cos(lat2) * Math.pow(Math.sin(lon / 2), 2);
-            double distance = 2 * 6_371_000 * Math.asin(Math.sqrt(Math.min(1, a)));
+            double distance = FieldWork.distance(((Number) location.get("latitude")).doubleValue(),
+                ((Number) location.get("longitude")).doubleValue(), ((Number) position.get("latitude")).doubleValue(),
+                ((Number) position.get("longitude")).doubleValue());
             if (distance > ((Number) location.get("radius")).doubleValue()) {
                 throw error(409, "Вы вне радиуса объекта.");
             }

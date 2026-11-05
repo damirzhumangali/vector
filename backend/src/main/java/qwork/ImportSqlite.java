@@ -20,7 +20,8 @@ final class ImportSqlite {
     private static final int BATCH_SIZE = 1_000;
     private static final Set<String> OPTIONAL_TABLES = Set.of("work_sites", "task_events", "task_media", "sync_events",
         "shift_calendar", "shifts", "shift_task_actions", "unavailable_employees", "incidents", "incident_tasks",
-        "work_plans", "planned_jobs", "assignment_settings", "planning_imports", "login_registry", "password_resets");
+        "work_plans", "planned_jobs", "assignment_settings", "planning_imports", "login_registry", "password_resets",
+        "field_work_defaults", "task_representative_reviews", "work_trips", "work_trip_tasks", "employee_work_modes");
     private static final List<Table> TABLES = List.of(
         new Table("companies", "id code name", ""),
         new Table("users", "id company_id name login role is_owner password_hash password_salt",
@@ -29,11 +30,20 @@ final class ImportSqlite {
         new Table("sessions", "token_hash user_id expires_at", ""),
         new Table("work_sites", "id company_id name address latitude longitude radius", ""),
         new Table("tasks", "id company_id assignee_id title object address description status checks photo_before photo_after rework_reason revision",
-            "location deadline arrival repeat_of cancel_reason result object_id"),
+            "location deadline arrival repeat_of cancel_reason result object_id "
+                + "purpose priority manager_id checklist outcome photo_pairs repeat_reason"),
         new Table("task_events", "id task_id status actor_id actor_name created_at reason", "position received_at"),
         new Table("task_media",
             "id task_id author_id author_name kind caption created_at captured_at latitude longitude accuracy "
-                + "sha256 width height original_image display_image rejected_reason rejected_at rejected_by", ""),
+                + "sha256 width height original_image display_image rejected_reason rejected_at rejected_by", "pair_key checklist_id"),
+        new Table("field_work_defaults", "company_id scope scope_key manager_id", ""),
+        new Table("task_representative_reviews",
+            "id task_id report_event_id issued_by expires_at method representative_name reason comment created_at",
+            "token_hash decision decided_at photo"),
+        new Table("work_trips", "id company_id employee_id created_by destination basis purpose planned_start planned_end created_at",
+            "started_at finished_at"),
+        new Table("work_trip_tasks", "trip_id task_id", ""),
+        new Table("employee_work_modes", "employee_id work_mode", ""),
         new Table("sync_events",
             "company_id event_id task_id actor_id kind expected_revision payload_hash occurred_at received_at "
                 + "requested_status photo_kind conflict_reason server_status server_revision resolved_at resolved_by", ""),

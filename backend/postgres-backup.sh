@@ -18,6 +18,21 @@ esac
 
 backend_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 
+mode=${QWORK_BACKUP_MODE:-compose}
+case "$mode" in
+    compose) ;;
+    direct)
+        : "${PGHOST:?Set PGHOST to the PostgreSQL endpoint}" \
+          "${PGDATABASE:?Set PGDATABASE to the source database}" \
+          "${PGUSER:?Set PGUSER to the PostgreSQL role}"
+        export PGCONNECT_TIMEOUT=${PGCONNECT_TIMEOUT:-10}
+        ;;
+    *)
+        printf '%s\n' 'QWORK_BACKUP_MODE must be compose or direct.' >&2
+        exit 2
+        ;;
+esac
+
 compose_db() {
     if [ -n "${COMPOSE_FILE:-}" ]; then
         docker compose exec -T db "$@"
@@ -25,6 +40,17 @@ compose_db() {
         docker compose --project-directory "$backend_dir" \
             -f "$backend_dir/compose.yaml" -f "$backend_dir/compose.postgres.yaml" \
             exec -T db "$@"
+    fi
+}
+
+postgres_command() {
+    if [ "$mode" = direct ]; then
+        "$@"
+    else
+        compose_db sh -ec '
+            export PGUSER="$POSTGRES_USER" PGDATABASE="$POSTGRES_DB"
+            exec "$@"
+        ' sh "$@"
     fi
 }
 
@@ -38,8 +64,8 @@ case "$action" in
         temporary=$(mktemp "${archive}.partial.XXXXXX")
         trap 'rm -f -- "$temporary"' EXIT
         trap 'exit 1' HUP INT TERM
-        compose_db sh -ec 'exec pg_dump -Fc -U "$POSTGRES_USER" -d "$POSTGRES_DB"' >"$temporary"
-        compose_db pg_restore --list <"$temporary" >/dev/null
+        postgres_command pg_dump -Fc >"$temporary"
+        postgres_command pg_restore --list <"$temporary" >/dev/null
         ln -- "$temporary" "$archive"
         printf 'Backup saved to %s\n' "$archive"
         ;;
@@ -55,13 +81,11 @@ case "$action" in
         esac
         [ "${#destination}" -le 63 ] || usage
         [ -f "$archive" ] && [ -r "$archive" ] || usage
-        compose_db pg_restore --list <"$archive" >/dev/null
-        compose_db sh -ec 'exec createdb -U "$POSTGRES_USER" -- "$1"' sh "$destination"
-        if ! compose_db sh -ec '
-            exec pg_restore --single-transaction --no-owner --no-privileges \
-                -U "$POSTGRES_USER" -d "$1"
-        ' sh "$destination" <"$archive"; then
-            compose_db sh -ec 'exec dropdb -U "$POSTGRES_USER" -- "$1"' sh "$destination"
+        postgres_command pg_restore --list <"$archive" >/dev/null
+        postgres_command sh -ec 'exec createdb --maintenance-db="$PGDATABASE" -- "$1"' sh "$destination"
+        if ! postgres_command pg_restore --single-transaction --no-owner --no-privileges \
+            -d "$destination" <"$archive"; then
+            postgres_command sh -ec 'exec dropdb --maintenance-db="$PGDATABASE" -- "$1"' sh "$destination"
             exit 1
         fi
         printf 'Restored into database %s\n' "$destination"

@@ -1,0 +1,50 @@
+{
+  "expo": {
+    "name": "qwork",
+    "slug": "qwork",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "platforms": [
+      "ios",
+      "android"
+    ],
+    "scheme": "qwork",
+    "ios": {
+      "bundleIdentifier": "com.qwork.mobile"
+    },
+    "android": {
+      "package": "com.qwork.mobile"
+    },
+    "plugins": [
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Разрешите qwork определить ваше местоположение при отметке прибытия на объект."
+        }
+      ],
+      [
+        "expo-secure-store",
+        {
+          "faceIDPermission": "Разрешите qwork использовать Face ID для быстрого входа."
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Разрешите qwork сделать снимок для фотоотчёта.",
+          "microphonePermission": false,
+          "recordAudioAndroid": false
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Разрешите qwork выбрать материалы к заявке из галереи.",
+          "microphonePermission": false
+        }
+      ],
+      "expo-notifications"
+    ]
+  }
+}

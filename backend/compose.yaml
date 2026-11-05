@@ -1,0 +1,36 @@
+services:
+  api:
+    build: .
+    restart: unless-stopped
+    environment:
+      QWORK_TRUST_PROXY: "1"
+      QWORK_DATABASE_URL: "${QWORK_DATABASE_URL:-}"
+      QWORK_EMAIL_PROVIDER: "${QWORK_EMAIL_PROVIDER:-resend}"
+      QWORK_EMAIL_API_KEY: "${QWORK_EMAIL_API_KEY:-}"
+      QWORK_EMAIL_FROM: "${QWORK_EMAIL_FROM:-}"
+      QWORK_PUBLIC_URL: "${QWORK_PUBLIC_URL:-}"
+    volumes:
+      - qwork_data:/var/lib/qwork
+    healthcheck:
+      test: ["CMD", "java", "-jar", "/app/qwork-api.jar", "--health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  https:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      QWORK_DOMAIN: "${QWORK_DOMAIN:?Set QWORK_DOMAIN to the public qwork hostname}"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  qwork_data:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,25 @@
+services:
+  api:
+    environment:
+      QWORK_DATABASE_URL: "postgresql://qwork:${QWORK_POSTGRES_PASSWORD:?Set QWORK_POSTGRES_PASSWORD}@db:5432/qwork"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: qwork
+      POSTGRES_USER: qwork
+      POSTGRES_PASSWORD: "${QWORK_POSTGRES_PASSWORD:?Set QWORK_POSTGRES_PASSWORD}"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "qwork", "-d", "qwork"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+volumes:
+  postgres_data:

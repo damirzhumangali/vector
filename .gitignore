@@ -6,9 +6,21 @@ Thumbs.db
 
 # Local runtime, credentials and archives
 node_modules/
+.venv/
 .env
 .env.*
 !.env.example
 *.log
 *.zip
 .openai/
+
+# Expo local state and generated native bundles
+mobile/.expo/
+mobile/dist/
+
+# qwork backend runtime data
+backend/data/
+backend/__pycache__/
+
+# Java build output
+backend/target/

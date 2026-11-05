@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Приглашение в qwork</title>
+  <script src="/invite.js" defer></script>
+  <style>
+    body { max-width: 34rem; padding: 2rem 1rem; margin: auto; font: 1rem/1.5 system-ui; }
+    input { box-sizing: border-box; width: 100%; padding: .5rem; font-size: 1rem; }
+    button { margin-top: .5rem; padding: .5rem; font: inherit; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Приглашение в qwork</h1>
+    <p>Откройте приложение и войдите с логином и паролем от диспетчера.</p>
+    <p><a id="open-app" hidden>Открыть qwork</a></p>
+    <div id="copy-controls" hidden>
+      <p>Если приложение не открылось, скопируйте ссылку и вставьте её на экране входа в qwork.</p>
+      <label for="invite-url">Персональная ссылка</label>
+      <input id="invite-url" readonly>
+      <button type="button" id="copy">Скопировать ссылку</button>
+    </div>
+    <p id="status" role="status"></p>
+    <noscript>Скопируйте адрес этой страницы и вставьте его на экране входа в qwork.</noscript>
+  </main>
+</body>
+</html>

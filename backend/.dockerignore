@@ -1,0 +1,8 @@
+*
+!pom.xml
+!invite.js
+!Dockerfile
+!src/
+!src/**
+!migrations/
+!migrations/*.sql

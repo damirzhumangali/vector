@@ -54,8 +54,12 @@ record TripBudget(long dailyRate, long transport, long lodging, long meals, long
     }
 
     static long plannedDays(Map<String, Object> row) {
-        var firstDay = Instant.parse((String) row.get("planned_start")).atZone(COMPANY_ZONE).toLocalDate();
-        var lastDay = Instant.parse((String) row.get("planned_end")).atZone(COMPANY_ZONE).toLocalDate();
+        return plannedDays((String) row.get("planned_start"), (String) row.get("planned_end"));
+    }
+
+    static long plannedDays(String start, String end) {
+        var firstDay = Instant.parse(start).atZone(COMPANY_ZONE).toLocalDate();
+        var lastDay = Instant.parse(end).atZone(COMPANY_ZONE).toLocalDate();
         return ChronoUnit.DAYS.between(firstDay, lastDay) + 1;
     }
 

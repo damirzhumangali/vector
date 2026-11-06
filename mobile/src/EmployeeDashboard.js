@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { AppState, Pressable, StyleSheet, Text, View, ScrollView } from 'react-native';
 import Svg, { Circle } from 'react-native-svg';
 import { colors as c, Icon } from './ui';
+import { EmployeeTripInbox } from './FieldOperations';
 
 const CLOSED = ['done', 'cancelled', 'repeated'];
 
@@ -72,7 +73,7 @@ function TaskCountdown({ task, deadline }) {
   );
 }
 
-export default function EmployeeDashboard({ tasks, name, onSelect }) {
+export default function EmployeeDashboard({ tasks, name, onSelect, request, offline, onTripOffer }) {
   const active = tasks.filter(task => !CLOSED.includes(task.status) && task.status !== 'review');
   const completed = tasks.filter(task => task.status === 'done').length;
   const review = tasks.filter(task => task.status === 'review').length;
@@ -86,6 +87,7 @@ export default function EmployeeDashboard({ tasks, name, onSelect }) {
   return (
     <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
       <Text accessibilityRole="header" style={styles.title}>{firstName ? `Здравствуйте, ${firstName}` : 'Мой рабочий день'}</Text>
+      {request && onTripOffer && <EmployeeTripInbox request={request} offline={offline} onOpen={onTripOffer} />}
       <View style={styles.dateCard}>
         <View style={styles.iconBox}><Icon name="calendar" size={25} /></View>
         <View style={styles.flex}>

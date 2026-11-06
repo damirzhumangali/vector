@@ -48,8 +48,6 @@ final class TripRequests {
         LEFT JOIN work_trips trip ON trip.id = r.trip_id AND trip.company_id = r.company_id
         WHERE r.company_id = ?
         """;
-    private static final Map<String, Object> NO_CONFLICTS = Map.of("shifts", List.of(), "trips", List.of());
-
     private TripRequests() {}
 
     static Map<String, Object> list(Connection db, Map<String, Object> user) throws SQLException {
@@ -131,14 +129,12 @@ final class TripRequests {
             taskIds.computeIfAbsent(number(row, "request_id"), key -> new ArrayList<>()).add(row.get("task_id").toString());
         }
         boolean pending = requests.stream().anyMatch(row -> "pending".equals(row.get("status")));
-        var shifts = pending ? shiftConflicts(db, scope, parameters) : Map.<Long, List<Map<String, Object>>>of();
-        var trips = pending ? tripConflicts(db, scope, parameters) : Map.<Long, List<Map<String, Object>>>of();
+        var conflicts = pending ? TripScheduleConflicts.read(db, TripScheduleConflicts.Source.REQUEST, scope, parameters)
+            : Map.<Long, TripScheduleConflicts.Conflicts>of();
         return requests.stream().map(row -> {
             long id = number(row, "id");
-            var conflicts = "pending".equals(row.get("status"))
-                ? Map.<String, Object>of("shifts", shifts.getOrDefault(id, List.of()), "trips", trips.getOrDefault(id, List.of()))
-                : NO_CONFLICTS;
-            return json(row, taskIds.getOrDefault(id, List.of()), conflicts);
+            return json(row, taskIds.getOrDefault(id, List.of()),
+                conflicts.getOrDefault(id, TripScheduleConflicts.EMPTY).json());
         }).toList();
     }
 
@@ -166,35 +162,4 @@ final class TripRequests {
         return out;
     }
 
-    private static Map<Long, List<Map<String, Object>>> shiftConflicts(Connection db, String scope, Object[] parameters)
-            throws SQLException {
-        var conflicts = new LinkedHashMap<Long, List<Map<String, Object>>>();
-        for (var row : Db.rows(db, """
-            SELECT r.id AS request_id, shift.id, shift.starts_at, shift.ends_at, shift.kind
-            FROM work_trip_requests r JOIN shifts shift ON shift.company_id = r.company_id AND shift.employee_id = r.employee_id
-            WHERE r.company_id = ? AND r.status = 'pending' AND shift.finished_at IS NULL
-              AND shift.starts_at < r.planned_end AND shift.ends_at > r.planned_start
-            """ + scope + " ORDER BY shift.starts_at, shift.id", parameters)) {
-            conflicts.computeIfAbsent(number(row, "request_id"), key -> new ArrayList<>()).add(Map.of(
-                "id", row.get("id").toString(), "startsAt", row.get("starts_at"),
-                "endsAt", row.get("ends_at"), "kind", row.get("kind")));
-        }
-        return conflicts;
-    }
-
-    private static Map<Long, List<Map<String, Object>>> tripConflicts(Connection db, String scope, Object[] parameters)
-            throws SQLException {
-        var conflicts = new LinkedHashMap<Long, List<Map<String, Object>>>();
-        for (var row : Db.rows(db, """
-            SELECT r.id AS request_id, trip.id, trip.destination, trip.planned_start, trip.planned_end
-            FROM work_trip_requests r JOIN work_trips trip ON trip.company_id = r.company_id AND trip.employee_id = r.employee_id
-            WHERE r.company_id = ? AND r.status = 'pending' AND trip.finished_at IS NULL
-              AND trip.planned_start < r.planned_end AND trip.planned_end > r.planned_start
-            """ + scope + " ORDER BY trip.planned_start, trip.id", parameters)) {
-            conflicts.computeIfAbsent(number(row, "request_id"), key -> new ArrayList<>()).add(Map.of(
-                "id", row.get("id").toString(), "destination", row.get("destination"),
-                "plannedStart", row.get("planned_start"), "plannedEnd", row.get("planned_end")));
-        }
-        return conflicts;
-    }
 }

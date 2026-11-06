@@ -467,9 +467,6 @@ function TripOverview({ trip, pending, loaded, offline, error, onTrips }) {
         ? `${pending[0].destination} · ${tripPeriod(pending[0])}` : `Запросов: ${pending.length}`}
         icon="clock" onPress={() => onTrips(pending.length === 1 ? { requestId: pending[0].id } : {})} />}
       {trip && <Action onPress={() => onTrips({})}>Все командировки</Action>}
-      {!trip && <Action primary disabled={offline} onPress={() => onTrips({ view: 'request' })}>
-        Запросить командировку
-      </Action>}
       {error && !offline && <Text style={styles.muted}>Не удалось обновить командировки.</Text>}
     </Card>
   );

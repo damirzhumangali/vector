@@ -80,9 +80,9 @@ final class XlsxImport {
         Map.entry("durationminutes", "durationMinutes"), Map.entry("длительность, мин", "durationMinutes")
     );
 
-    private record Cell(String text, boolean numeric, boolean formula) {}
-    private record SheetRow(int number, Map<String, Cell> cells) {}
-    private record Sheet(List<SheetRow> rows, boolean dates1904) {}
+    record Cell(String text, boolean numeric, boolean formula) {}
+    record SheetRow(int number, Map<String, Cell> cells) {}
+    record Sheet(List<SheetRow> rows, boolean dates1904) {}
 
     private XlsxImport() {}
 
@@ -113,18 +113,7 @@ final class XlsxImport {
         }
         boolean direct = "tasks".equals(mode);
         String name = fileName(payload);
-        if (!(payload.get("base64") instanceof String encoded) || encoded.length() > ((MAX_BYTES + 2) / 3) * 4) {
-            throw Domain.error(400, "Прикрепите файл Excel .xlsx размером до 2 МБ.");
-        }
-        Sheet sheet;
-        try {
-            byte[] bytes = Base64.getDecoder().decode(encoded);
-            if (bytes.length > MAX_BYTES) throw new IOException();
-            sheet = read(bytes);
-        } catch (IOException | IllegalArgumentException | SAXException | ParserConfigurationException ex) {
-            throw Domain.error(400, "Не удалось прочитать файл Excel. Сохраните его в формате .xlsx и попробуйте снова.");
-        }
-        if (sheet.rows().isEmpty()) throw Domain.error(400, "Первый лист Excel пуст.");
+        Sheet sheet = readPayload(payload);
         Map<String, String> columns = new LinkedHashMap<>();
         var known = new HashSet<String>();
         sheet.rows().getFirst().cells().forEach((column, cell) -> {
@@ -211,6 +200,22 @@ final class XlsxImport {
         if (apply) recordRun(db, user, name, (String) mode, results, imported);
         return direct ? Map.of("rows", results, "imported", imported, "mode", "tasks", "tasks", tasks)
             : Map.of("rows", results, "imported", imported);
+    }
+
+    static Sheet readPayload(Map<String, Object> payload) {
+        if (!(payload.get("base64") instanceof String encoded) || encoded.length() > ((MAX_BYTES + 2) / 3) * 4) {
+            throw Domain.error(400, "Прикрепите файл Excel .xlsx размером до 2 МБ.");
+        }
+        Sheet sheet;
+        try {
+            byte[] bytes = Base64.getDecoder().decode(encoded);
+            if (bytes.length > MAX_BYTES) throw new IOException();
+            sheet = read(bytes);
+        } catch (IOException | IllegalArgumentException | SAXException | ParserConfigurationException ex) {
+            throw Domain.error(400, "Не удалось прочитать файл Excel. Сохраните его в формате .xlsx и попробуйте снова.");
+        }
+        if (sheet.rows().isEmpty()) throw Domain.error(400, "Первый лист Excel пуст.");
+        return sheet;
     }
 
     private static String fileName(Map<String, Object> payload) {

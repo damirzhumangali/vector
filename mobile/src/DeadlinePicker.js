@@ -52,11 +52,15 @@ export function deadlineToIso(value) {
   return validDate(value) ? value.toISOString() : null;
 }
 
-export default function DeadlinePicker({ value, onChange, disabled = false }) {
+export default function DeadlinePicker({ value, onChange, disabled = false,
+  label = 'Выполнить до', required = false, showQuick = true, showHelper = true, suggestedDate, minimumDate, maximumDate }) {
   const [editor, setEditor] = useState(null);
   const [draft, setDraft] = useState(null);
   const insets = useSafeAreaInsets();
   const selected = validDate(value) ? value : null;
+  const customLabel = label !== 'Выполнить до';
+  const dateLabel = customLabel ? `${label}. Дата` : 'Дата выполнения';
+  const timeLabel = customLabel ? `${label}. Время` : 'Время выполнения';
   const today = new Date();
   const tomorrow = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
   const todayAvailable = validDate(quickDeadline(0, selected, today));
@@ -64,7 +68,10 @@ export default function DeadlinePicker({ value, onChange, disabled = false }) {
   function open(mode) {
     if (disabled) return;
     Keyboard.dismiss();
-    setDraft(selected ? new Date(selected.getTime()) : defaultDeadline());
+    let initial = selected ?? (validDate(suggestedDate) ? suggestedDate : defaultDeadline());
+    if (mode === 'date' && validDate(minimumDate) && startOfDay(initial) < startOfDay(minimumDate)) initial = minimumDate;
+    if (mode === 'date' && validDate(maximumDate) && startOfDay(initial) > startOfDay(maximumDate)) initial = maximumDate;
+    setDraft(new Date(initial.getTime()));
     setEditor(mode);
   }
 
@@ -103,7 +110,8 @@ export default function DeadlinePicker({ value, onChange, disabled = false }) {
       value={draft}
       mode={editor}
       display={Platform.OS === 'ios' ? 'spinner' : 'default'}
-      minimumDate={editor === 'date' ? startOfDay(today) : undefined}
+      minimumDate={editor === 'date' ? startOfDay(validDate(minimumDate) ? minimumDate : today) : undefined}
+      maximumDate={editor === 'date' && validDate(maximumDate) ? startOfDay(maximumDate) : undefined}
       locale="ru-RU"
       is24Hour
       themeVariant="light"
@@ -116,14 +124,14 @@ export default function DeadlinePicker({ value, onChange, disabled = false }) {
   return (
     <View style={styles.container}>
       <View style={styles.heading}>
-        <Text style={styles.label}>Выполнить до</Text>
-        {selected ? <Pressable accessibilityRole="button" accessibilityLabel="Убрать срок выполнения"
+        <Text style={styles.label}>{label}</Text>
+        {!required && (selected ? <Pressable accessibilityRole="button" accessibilityLabel="Убрать срок выполнения"
           accessibilityState={{ disabled }} disabled={disabled}
           onPress={() => { if (!disabled) onChange(null); }} style={styles.clear}>
           <Text style={styles.link}>Без срока</Text>
-        </Pressable> : <Text style={styles.optional}>Необязательно</Text>}
+        </Pressable> : <Text style={styles.optional}>Необязательно</Text>)}
       </View>
-      <View style={styles.quickRow}>
+      {showQuick && <View style={styles.quickRow}>
         {[[0, 'Сегодня', today], [1, 'Завтра', tomorrow]].map(([offset, label, day]) => (
           <Pressable key={offset} accessibilityRole="button" accessibilityLabel={`Выполнить ${label.toLowerCase()}`}
             accessibilityState={{ disabled: disabled || (offset === 0 && !todayAvailable), selected: sameDay(selected, day) }}
@@ -139,10 +147,10 @@ export default function DeadlinePicker({ value, onChange, disabled = false }) {
           style={({ pressed }) => [styles.quick, (pressed || disabled) && styles.dimmed]}>
           <Text style={styles.quickText}>Выбрать дату</Text>
         </Pressable>
-      </View>
+      </View>}
       <View style={styles.fields}>
         <Pressable accessibilityRole="button" accessibilityLabel={selected
-          ? `Дата выполнения: ${selected.toLocaleDateString('ru-RU')}` : 'Выбрать дату выполнения'}
+          ? `${dateLabel}. ${selected.toLocaleDateString('ru-RU')}` : customLabel ? dateLabel : 'Выбрать дату выполнения'}
           accessibilityState={{ disabled }} disabled={disabled} onPress={() => open('date')}
           style={({ pressed }) => [styles.field, (pressed || disabled) && styles.dimmed]}>
           <Icon name="calendar" size={21} />
@@ -155,8 +163,8 @@ export default function DeadlinePicker({ value, onChange, disabled = false }) {
           <Icon name="chevron-right" color={colors.muted} size={16} />
         </Pressable>
         <Pressable accessibilityRole="button" accessibilityLabel={selected
-          ? `Время выполнения: ${selected.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', hour12: false })}`
-          : 'Выбрать время выполнения'}
+          ? `${timeLabel}. ${selected.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', hour12: false })}`
+          : customLabel ? timeLabel : 'Выбрать время выполнения'}
           accessibilityState={{ disabled }} disabled={disabled} onPress={() => open('time')}
           style={({ pressed }) => [styles.field, (pressed || disabled) && styles.dimmed]}>
           <Icon name="clock" size={21} />
@@ -169,9 +177,9 @@ export default function DeadlinePicker({ value, onChange, disabled = false }) {
           <Icon name="chevron-right" color={colors.muted} size={16} />
         </Pressable>
       </View>
-      <Text style={styles.helper}>{selected
+      {showHelper && <Text style={styles.helper}>{selected
         ? 'Дата и время по часовому поясу вашего телефона.'
-        : 'Можно создать заявку без срока или выбрать удобную дату и время.'}</Text>
+        : required ? 'Выберите дату и время.' : 'Можно создать заявку без срока или выбрать удобную дату и время.'}</Text>}
       {Platform.OS === 'ios' ? (
         <Modal transparent animationType="slide" visible={Boolean(editor)} onRequestClose={close}>
           <View style={styles.modal}>
@@ -183,7 +191,7 @@ export default function DeadlinePicker({ value, onChange, disabled = false }) {
                 <Pressable accessibilityRole="button" onPress={close} style={styles.toolbarButton}>
                   <Text style={styles.link}>Отмена</Text>
                 </Pressable>
-                <Text accessibilityRole="header" style={styles.sheetTitle}>{editor === 'date' ? 'Дата выполнения' : 'Время выполнения'}</Text>
+                <Text accessibilityRole="header" style={styles.sheetTitle}>{editor === 'date' ? dateLabel : timeLabel}</Text>
                 <Pressable accessibilityRole="button" accessibilityState={{ disabled }} disabled={disabled}
                   onPress={commit} style={[styles.toolbarButton, disabled && styles.dimmed]}>
                   <Text style={[styles.link, styles.done]}>Готово</Text>

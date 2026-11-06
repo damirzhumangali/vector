@@ -32,7 +32,8 @@ final class Db {
         "0009_xlsx_import.sql", "0010_departments.sql", "0011_login_registry.sql", "0012_optional_email.sql",
         "0013_field_reports.sql", "0014_representative_reviews.sql", "0015_field_operations.sql", "0016_trip_requests.sql",
         "0017_task_assignment_changes.sql", "0018_import_journal.sql", "0019_incident_push.sql",
-        "0020_trip_budgets.sql", "0021_task_schedule.sql", "0022_trip_offers.sql"
+        "0020_trip_budgets.sql", "0021_task_schedule.sql", "0022_trip_offers.sql",
+        "0023_trip_offer_history.sql", "0024_trip_route.sql", "0025_trip_actual_expenses.sql"
     );
     private static final String SQLITE_SCHEMA = """
         CREATE TABLE IF NOT EXISTS companies (
@@ -164,7 +165,8 @@ final class Db {
                         + Shift.SQLITE_SCHEMA + Incidents.SQLITE_SCHEMA + Planning.SQLITE_SCHEMA
                         + AutoAssignment.SQLITE_SCHEMA + XlsxImport.SQLITE_SCHEMA
                         + RepresentativeReviews.SQLITE_SCHEMA + Trips.SQLITE_SCHEMA + TripRequests.SQLITE_SCHEMA
-                        + IncidentPush.SQLITE_SCHEMA + TripOffers.SQLITE_SCHEMA).split(";")) {
+                        + IncidentPush.SQLITE_SCHEMA + TripOffers.SQLITE_SCHEMA + TripRoutes.SQLITE_SCHEMA
+                        + TripActualExpenses.SQLITE_SCHEMA).split(";")) {
                     if (!sql.isBlank()) {
                         statement.execute(sql);
                     }
@@ -200,6 +202,7 @@ final class Db {
                 "budget", "TEXT", "estimate", "TEXT"
             ));
             addMissingColumns(db, "work_trip_requests", Map.of("estimate", "TEXT"));
+            addMissingColumns(db, "work_trip_offers", Map.of("proposal_estimate", "TEXT", "declined_at", "TEXT"));
             FieldWork.initSqlite(db);
             Sync.initSqlite(db);
             update(db, """

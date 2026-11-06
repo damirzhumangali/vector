@@ -1,10 +1,18 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { AppState, Keyboard, Modal, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
-import DateTimePicker from '@react-native-community/datetimepicker';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { AppState, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { randomUUID } from 'expo-crypto';
 import { colors, Icon } from './ui';
+import DeadlinePicker, { deadlineToIso } from './DeadlinePicker';
+import { TripBudgetFields, TripBudgetSummary, tripBudgetDraft, tripBudgetPayload } from './TripBudget';
+import { KURMANGAZY_DESTINATIONS, TRIP_CITIES } from './TripDestinations';
+import DispatcherTripOffer from './DispatcherTripOffer';
+import { TripOfferCard, TripOfferHistory } from './TripOfferCard';
+import FieldVisitsOverview, { TripOfferPreview } from './FieldVisitsOverview';
+import { TripRouteSummary } from './TripRoute';
+import { TripActualExpenses } from './TripActualExpenses';
+import TripImport from './TripImport';
 
-const TASK_STATUS = {
+export const TASK_STATUS = {
   assigned: 'Назначена', unassigned: 'Без исполнителя', accepted: 'Принята сотрудником',
   travel: 'В пути', arrived: 'На объекте', work: 'В работе', paused: 'На паузе',
   review: 'Ожидает приёмки', done: 'Принята', rework: 'На доработке',
@@ -69,6 +77,12 @@ function useResource(request, path, paused = false) {
       if (generation.current === version) setFailure(reason);
     }
   }, [request, path, paused]);
+  const applyUpdate = useCallback(update => {
+    // A poll started before the write may still return the old report.
+    generation.current++;
+    setValue(current => current ? update(current) : current);
+    setFailure(null);
+  }, []);
   useEffect(() => {
     if (!path || paused || !request) return;
     void reload();
@@ -80,7 +94,8 @@ function useResource(request, path, paused = false) {
       clearInterval(timer);
     };
   }, [reload, path, paused, request]);
-  return { value, error: failure ? failure.message || 'Не удалось получить данные.' : '', errorStatus: failure?.status, reload };
+  return { value, error: failure ? failure.message || 'Не удалось получить данные.' : '',
+    errorStatus: failure?.status, reload, applyUpdate };
 }
 
 function useAction() {
@@ -88,14 +103,16 @@ function useAction() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   async function run(operation) {
-    if (locked.current) return;
+    if (locked.current) return false;
     locked.current = true;
     setBusy(true);
     setError('');
     try {
       await operation();
+      return true;
     } catch (reason) {
       setError(reason.message || 'Не удалось сохранить изменения.');
+      return false;
     } finally {
       locked.current = false;
       setBusy(false);
@@ -226,27 +243,6 @@ function FieldBoard({ board, request, reload, onTask, onTrip }) {
   );
 }
 
-function localDateTime(date) {
-  const parts = [date.getMonth() + 1, date.getDate(), date.getHours(), date.getMinutes()].map(value => String(value).padStart(2, '0'));
-  return `${date.getFullYear()}-${parts[0]}-${parts[1]} ${parts[2]}:${parts[3]}`;
-}
-
-function toIso(value) {
-  const match = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})$/.exec(value);
-  if (!match) return null;
-  const [, year, month, day, hours, minutes] = match.map(Number);
-  const date = new Date(year, month - 1, day, hours, minutes);
-  return localDateTime(date) === value ? date.toISOString() : null;
-}
-
-function defaultPeriod() {
-  const start = new Date();
-  start.setHours(start.getHours() + 1, 0, 0, 0);
-  const end = new Date(start);
-  end.setDate(end.getDate() + 1);
-  return { start: localDateTime(start), end: localDateTime(end) };
-}
-
 function Field({ label, value, onChange, disabled, limit, placeholder, multiline = false }) {
   return (
     <View style={styles.fill}>
@@ -265,13 +261,6 @@ function tripDay(value) {
   return day;
 }
 
-function tripPeriod(start, end) {
-  if (!start || !end || start > end) return null;
-  const last = new Date(end);
-  last.setHours(23, 59, 59, 999);
-  return { plannedStart: start.toISOString(), plannedEnd: last.toISOString() };
-}
-
 function formatPeriod(start, end) {
   const first = tripDay(start);
   const last = tripDay(end);
@@ -288,68 +277,6 @@ function tripPlanLabel(trip) {
   const isFullDay = +start === +tripDay(start) && end.getHours() === 23 && end.getMinutes() === 59;
   return isFullDay ? formatPeriod(trip.plannedStart, trip.plannedEnd)
     : `${formatTime(trip.plannedStart)} — ${formatTime(trip.plannedEnd)}`;
-}
-
-function TripDates({ days, onChange, disabled = false }) {
-  const [editing, setEditing] = useState(null);
-  const [draft, setDraft] = useState(null);
-  const insets = useSafeAreaInsets();
-  const close = () => setEditing(null);
-
-  function open(key) {
-    Keyboard.dismiss();
-    setDraft(days[key] ?? days.start ?? tripDay(new Date()));
-    setEditing(key);
-  }
-
-  function commit(value) {
-    const date = tripDay(value);
-    if (!date || !editing || disabled) return;
-    if (editing === 'start') {
-      onChange({ start: date, end: days.end && days.end >= date ? days.end : date });
-    } else {
-      onChange({ start: days.start && days.start <= date ? days.start : date, end: date });
-    }
-    close();
-  }
-
-  const picker = editing && draft ? <DateTimePicker value={draft} mode="date"
-    display={Platform.OS === 'ios' ? 'inline' : 'default'} locale="ru-RU" themeVariant="light"
-    minimumDate={editing === 'end' ? days.start ?? undefined : undefined}
-    style={styles.nativeDatePicker} onChange={(event, value) => {
-      if (Platform.OS === 'android') {
-        if (event.type === 'set') commit(value);
-        else close();
-      } else if (value) setDraft(value);
-    }} /> : null;
-
-  return <>
-    <View style={styles.dateRow}>
-      {[['start', 'Начало'], ['end', 'Окончание']].map(([key, label]) => (
-        <Pressable key={key} accessibilityRole="button" disabled={disabled} accessibilityState={{ disabled }}
-          onPress={() => open(key)} style={({ pressed }) => [styles.dateField, (pressed || disabled) && styles.dim]}>
-          <Icon name="calendar" size={17} />
-          <View style={styles.fill}>
-            <Text style={styles.muted}>{label}</Text>
-            <Text style={styles.label}>{days[key]?.toLocaleDateString('ru-RU', DAY_FORMAT) ?? 'Выбрать дату'}</Text>
-          </View>
-        </Pressable>
-      ))}
-    </View>
-    {Platform.OS === 'ios' ? <Modal transparent animationType="slide" visible={Boolean(editing)} onRequestClose={close}>
-      <View style={styles.dateOverlay}>
-        <Pressable style={StyleSheet.absoluteFill} accessibilityRole="button" accessibilityLabel="Закрыть календарь" onPress={close} />
-        <View accessibilityViewIsModal style={[styles.dateSheet, { paddingBottom: Math.max(insets.bottom, 16) }]}>
-          <View style={styles.dateToolbar}>
-            <Button onPress={close}>Отмена</Button>
-            <Text accessibilityRole="header" style={styles.label}>{editing === 'end' ? 'Окончание' : 'Начало'}</Text>
-            <Button selected disabled={disabled} onPress={() => commit(draft)}>Готово</Button>
-          </View>
-          {picker}
-        </View>
-      </View>
-    </Modal> : picker}
-  </>;
 }
 
 function TripTaskOptions({ tasks, selected, onChange, disabled }) {
@@ -376,113 +303,158 @@ function eligibleTripTasks(tasks, employeeId) {
     && !UNLINKABLE.has(task.status) && !task.tripId);
 }
 
-function TripRequestForm({ request, tasks, trips, offline, unavailable, onCancel, onSubmitted }) {
-  const [destination, setDestination] = useState('');
-  const [purpose, setPurpose] = useState('');
-  const [days, setDays] = useState({ start: null, end: null });
-  const [taskIds, setTaskIds] = useState([]);
-  const [showTasks, setShowTasks] = useState(false);
-  const schedule = useResource(request, '/shifts', offline);
-  const action = useAction();
-  const period = tripPeriod(days.start, days.end);
-  const overlaps = (start, end) => period && +new Date(start) <= +new Date(period.plannedEnd)
-    && +new Date(end) > +new Date(period.plannedStart);
-  const shifts = (schedule.value?.shifts ?? []).filter(shift => !shift.finishedAt && overlaps(shift.startsAt, shift.endsAt));
-  const matchingTrips = trips.filter(trip => trip.status !== 'finished' && overlaps(trip.plannedStart, trip.plannedEnd));
-
-  function submit() {
-    void action.run(async () => {
-      const result = await request('/trip-requests', { method: 'POST', body: {
-        destination: destination.trim(), purpose: purpose.trim(), ...period, taskIds,
-      } });
-      onSubmitted(result.request);
-    });
+export function VisitOptionPicker({ label, icon, options, selected, onSelect, disabled, empty, visibleLimit = 12 }) {
+  const [expanded, setExpanded] = useState(false);
+  const [search, setSearch] = useState('');
+  const multiple = Array.isArray(selected);
+  const current = multiple ? null : options.find(option => option.id === selected);
+  const query = search.trim().toLocaleLowerCase('ru-RU');
+  const filtered = options.filter(option => `${option.label} ${option.detail ?? ''}`.toLocaleLowerCase('ru-RU').includes(query));
+  const count = multiple && selected.length ? `Выбрано · ${selected.length}` : '';
+  function close() {
+    setSearch('');
+    setExpanded(false);
   }
 
-  return <Card title="Запросить командировку" icon="briefcase">
-    <Text style={styles.muted}>Укажите место, даты и цель поездки. Запрос появится у руководителя и диспетчера.</Text>
-    <Field label="Куда" value={destination} onChange={setDestination} disabled={action.busy} limit={300}
-      placeholder="Город или объект" />
-    <TripDates days={days} onChange={setDays} disabled={action.busy} />
-    {period && (schedule.value || matchingTrips.length > 0) && <View style={styles.inset}>
-      <Text style={styles.label}>График на выбранные даты</Text>
-      {shifts.slice(0, 3).map(shift => <Text key={shift.id} style={styles.muted}>
-        {shift.kind === 'duty' ? 'Дежурство' : 'Смена'} · {formatTime(shift.startsAt)} — {formatTime(shift.endsAt)}
-      </Text>)}
-      {matchingTrips.slice(0, 3).map(trip => <Text key={`trip-${trip.id}`} style={styles.warning}>
-        Командировка · {trip.destination} · {formatPeriod(trip.plannedStart, trip.plannedEnd)}
-      </Text>)}
-      {!shifts.length && !matchingTrips.length && <Text style={styles.muted}>На эти даты в графике пока ничего нет.</Text>}
-      {(shifts.length > 3 || matchingTrips.length > 3) && <Text style={styles.muted}>Другие записи есть в графике.</Text>}
-    </View>}
-    <Field label="Зачем" value={purpose} onChange={setPurpose} disabled={action.busy} limit={1000}
-      placeholder="Например, обследовать оборудование" multiline />
-    <Button disabled={action.busy} onPress={() => setShowTasks(!showTasks)}>
-      {showTasks ? 'Скрыть заявки' : taskIds.length ? `Связанные заявки · ${taskIds.length}` : 'Привязать заявки · необязательно'}
-    </Button>
-    {showTasks && <TripTaskOptions tasks={eligibleTripTasks(tasks)} selected={taskIds} onChange={setTaskIds} disabled={action.busy} />}
-    {offline && <Text style={styles.warning}>Подключитесь к интернету, чтобы отправить запрос.</Text>}
-    {unavailable && <Text style={styles.warning}>Запросы станут доступны после обновления сервера.</Text>}
-    <Notice message={action.error} />
-    <Button selected disabled={offline || unavailable || action.busy || !period || !destination.trim() || !purpose.trim()} onPress={submit}>
-      {action.busy ? 'Отправляем…' : 'Отправить запрос'}
-    </Button>
-    <Button disabled={action.busy} onPress={onCancel}>К командировкам</Button>
-  </Card>;
+  return <View style={styles.picker}>
+    <Pressable accessibilityRole="button" accessibilityState={{ expanded, disabled }}
+      accessibilityLabel={[label, current?.label || count].filter(Boolean).join('. ')} disabled={disabled}
+      onPress={() => setExpanded(!expanded)} style={({ pressed }) => [styles.pickerButton, pressed && styles.dim]}>
+      <View style={styles.pickerIcon}><Icon name={icon} size={19} /></View>
+      <View style={styles.fill}>
+        <Text style={styles.label}>{current?.label ?? label}</Text>
+        {current?.detail ? <Text style={styles.muted}>{current.detail}</Text> : null}
+        {count ? <Text style={styles.muted}>{count}</Text> : null}
+      </View>
+      <Icon name={expanded ? 'close' : 'chevron-right'} size={17} color={colors.muted} />
+    </Pressable>
+    {expanded && <>
+      {options.length > 5 && <TextInput accessibilityLabel={`Поиск · ${label}`} value={search}
+        onChangeText={setSearch} placeholder="Поиск" placeholderTextColor={colors.muted}
+        editable={!disabled} style={styles.input} />}
+      {filtered.slice(0, visibleLimit).map(option => {
+        const checked = multiple ? selected.includes(option.id) : selected === option.id;
+        return <Pressable key={option.id} accessibilityRole={multiple ? 'checkbox' : 'radio'}
+          accessibilityState={{ checked, disabled }} disabled={disabled}
+          onPress={() => {
+            if (multiple) onSelect(checked ? selected.filter(id => id !== option.id) : [...selected, option.id]);
+            else { onSelect(option.id); close(); }
+          }} style={[styles.taskOption, checked && styles.taskOptionChecked]}>
+          <View style={styles.fill}><Text style={styles.label}>{option.label}</Text>
+            {option.detail ? <Text style={styles.muted}>{option.detail}</Text> : null}
+          </View>
+          {checked && <Icon name="check" size={16} />}
+        </Pressable>;
+      })}
+      {!filtered.length && <Text style={styles.muted}>{query ? 'По этому запросу ничего нет.' : empty}</Text>}
+      {filtered.length > visibleLimit && <Text style={styles.muted}>Уточните поиск, чтобы увидеть нужный вариант.</Text>}
+      {multiple && <Button onPress={close}>Готово</Button>}
+    </>}
+  </View>;
 }
 
-function TripForm({ request, employees, tasks, onCreated, onCancel }) {
+function TripForm({ request, employees, objects, onCreated, onCancel, offline = false, serverUnavailable = false,
+  supportsRoutes = false }) {
   const [employeeId, setEmployeeId] = useState(null);
-  const [selectedTasks, setSelectedTasks] = useState([]);
+  const [objectId, setObjectId] = useState(null);
+  const [placeSource, setPlaceSource] = useState('organizations');
+  const [organizations, setOrganizations] = useState([]);
+  const [city, setCity] = useState('');
   const [destination, setDestination] = useState('');
-  const [basis, setBasis] = useState('');
   const [purpose, setPurpose] = useState('');
-  const [period, setPeriod] = useState(defaultPeriod);
+  const [comment, setComment] = useState('');
+  const submission = useRef(null);
   const action = useAction();
-  const eligible = tasks.filter(task => task.assigneeId === employeeId && !UNLINKABLE.has(task.status) && !task.tripId);
-  const plannedStart = toIso(period.start.trim());
-  const plannedEnd = toIso(period.end.trim());
-  const validPeriod = plannedStart && plannedEnd && plannedEnd > plannedStart;
-  const ready = employeeId && destination.trim() && basis.trim() && purpose.trim() && validPeriod && selectedTasks.length > 0;
+  const selectedObject = objects.find(object => String(object.id) === objectId);
+  const multiRoute = organizations.length > 1;
+  let place;
+  if (placeSource === 'directory' && selectedObject) place = { objectId };
+  if (placeSource === 'manual' && destination.trim()) place = { destination: destination.trim() };
+  if (placeSource === 'city' && city.trim()) place = { destination: city.trim() };
+  if (placeSource === 'organizations' && organizations.length) {
+    if (!multiRoute) place = { destination: organizations[0] };
+    else if (supportsRoutes) place = { destinations: organizations };
+  }
+  const selectedEmployee = employees.find(person => String(person.id) === employeeId);
+  const ready = !offline && !serverUnavailable && Boolean(selectedEmployee && place && purpose.trim());
   function save() {
+    if (!ready) return;
     void action.run(async () => {
-      const { trip } = await request('/trips', { method: 'POST', body: {
-        employeeId, destination: destination.trim(), basis: basis.trim(), purpose: purpose.trim(),
-        plannedStart, plannedEnd, taskIds: selectedTasks,
-      } });
-      onCreated(trip.id);
+      const body = { employeeId, ...place, purpose: purpose.trim(), comment: comment.trim() };
+      const draft = JSON.stringify(body);
+      if (submission.current?.draft !== draft) submission.current = { draft, requestId: randomUUID() };
+      const { offer } = await request('/trip-offers', {
+        method: 'POST', body: { ...body, requestId: submission.current.requestId },
+      });
+      onCreated(offer.id, offer);
     });
   }
   return (
-    <Card title="Новая командировка" icon="briefcase">
-      <Text style={styles.label}>Сотрудник</Text>
-      <View style={styles.choices}>
-        {employees.map(person => <Button key={person.id} selected={employeeId === person.id} disabled={action.busy}
-          onPress={() => { setEmployeeId(person.id); setSelectedTasks([]); }}>{person.name}</Button>)}
-      </View>
-      <Field label="Место назначения" value={destination} onChange={setDestination} limit={300} disabled={action.busy} />
-      <Field label="Основание" value={basis} onChange={setBasis} limit={500} disabled={action.busy} placeholder="Например, приказ №17" />
-      <Field label="Цель командировки" value={purpose} onChange={setPurpose} limit={1000} disabled={action.busy} />
-      <Field label="Плановое начало" value={period.start} onChange={start => setPeriod(previous => ({ ...previous, start }))}
-        limit={16} disabled={action.busy} placeholder="ГГГГ-ММ-ДД ЧЧ:ММ" />
-      <Field label="Плановое окончание" value={period.end} onChange={end => setPeriod(previous => ({ ...previous, end }))}
-        limit={16} disabled={action.busy} placeholder="ГГГГ-ММ-ДД ЧЧ:ММ" />
-      {!validPeriod && <Text style={styles.warning}>Укажите даты в формате ГГГГ-ММ-ДД ЧЧ:ММ. Окончание должно быть позже начала.</Text>}
-      <Text style={styles.label}>Связанные заявки · {selectedTasks.length}</Text>
-      <View style={styles.choices}>
-        {eligible.map(task => <Button key={task.id} selected={selectedTasks.includes(task.id)}
-          disabled={action.busy || (selectedTasks.length >= 50 && !selectedTasks.includes(task.id))}
-          onPress={() => setSelectedTasks(previous => previous.includes(task.id)
-            ? previous.filter(id => id !== task.id) : [...previous, task.id])}>№{task.id} · {task.title}</Button>)}
-      </View>
-      {!eligible.length && <Text style={styles.muted}>{employeeId
-        ? 'У сотрудника нет свободных заявок. Назначьте заявку перед созданием командировки.' : 'Выберите сотрудника.'}</Text>}
+    <View style={styles.screen}>
+      <View style={styles.choices}><Button disabled={action.busy} onPress={onCancel}>‹ К выездам</Button></View>
+      <Card title="Новая командировка" icon="pin">
+        <Text style={styles.muted}>{placeSource === 'organizations' && supportsRoutes
+          ? 'Укажите организации и сотрудника. Он предложит порядок посещения, даты и ставку.'
+          : 'Укажите место и сотрудника. Сотрудник предложит даты и ставку за день.'}</Text>
+        <Text style={styles.label}>Место назначения</Text>
+        <View style={styles.choices}>
+          <Button selected={placeSource === 'organizations'} disabled={action.busy}
+            onPress={() => setPlaceSource('organizations')}>Организации</Button>
+          <Button selected={placeSource === 'city'} disabled={action.busy}
+            onPress={() => setPlaceSource('city')}>Город</Button>
+        </View>
+        {placeSource === 'organizations' && <>
+          <VisitOptionPicker label={supportsRoutes ? 'Выбрать организации' : 'Выбрать организацию'} icon="building"
+            options={KURMANGAZY_DESTINATIONS} selected={supportsRoutes ? organizations : organizations[0]}
+            onSelect={value => setOrganizations(supportsRoutes ? value : [value])}
+            disabled={action.busy} visibleLimit={KURMANGAZY_DESTINATIONS.length} />
+          <Text style={styles.muted}>{KURMANGAZY_DESTINATIONS.length} организаций</Text>
+          {supportsRoutes && organizations.length > 0 && <View style={styles.inset}>
+            <Text style={styles.label}>Организации в поездке</Text>
+            {organizations.map(organization => <Text key={organization} style={styles.body}>
+              {KURMANGAZY_DESTINATIONS.find(place => place.id === organization)?.shortLabel ?? organization}
+            </Text>)}
+          </View>}
+          {!supportsRoutes && multiRoute && <Text style={styles.warning}>Для отправки маршрута нужно обновить сервер qwork.</Text>}
+        </>}
+        {placeSource === 'city' && <>
+          <Field label="Название города" value={city} onChange={setCity} limit={300}
+            disabled={action.busy} placeholder="Введите название города" />
+          <View style={styles.choices}>
+            {TRIP_CITIES.map(item => <Button key={item.id} selected={city.trim() === item.id} disabled={action.busy}
+              onPress={() => setCity(item.id)}>{item.label}</Button>)}
+          </View>
+        </>}
+        {placeSource === 'directory' && <VisitOptionPicker label="Выбрать объект" icon="building" selected={objectId} onSelect={setObjectId}
+          disabled={action.busy} empty="В справочнике пока нет объектов."
+          options={objects.map(object => ({ id: String(object.id), label: object.name, detail: object.address }))} />}
+        {placeSource === 'manual' && <Field label="Объект или адрес" value={destination} onChange={setDestination} limit={300}
+          disabled={action.busy} placeholder="Укажите место поездки" />}
+        <View style={styles.choices}>
+          {placeSource !== 'directory' && objects.length > 0 && <Button disabled={action.busy}
+            onPress={() => setPlaceSource('directory')}>Из справочника</Button>}
+          {placeSource !== 'manual' && <Button disabled={action.busy}
+            onPress={() => setPlaceSource('manual')}>Другой объект или адрес</Button>}
+        </View>
+        <VisitOptionPicker label="Назначить сотрудника" icon="user" selected={employeeId}
+          disabled={action.busy} empty="В команде пока нет сотрудников."
+          options={employees.map(person => ({ id: String(person.id), label: person.name, detail: person.department }))}
+          onSelect={setEmployeeId} />
+        {!employees.length && <Text style={styles.muted}>Сначала добавьте сотрудника в команду.</Text>}
+      </Card>
+      <Card title="Задание поездки" icon="clipboard">
+        <Field label="Что нужно сделать" value={purpose} onChange={setPurpose} limit={1000} disabled={action.busy}
+          placeholder="Например, проверить и настроить оборудование" multiline />
+        <Field label="Комментарий · необязательно" value={comment} onChange={setComment} limit={1000}
+          disabled={action.busy} placeholder="Контакты на месте или важные детали" multiline />
+      </Card>
+      {offline && <Text style={styles.warning}>Подключитесь к интернету, чтобы отправить командировку.</Text>}
+      {serverUnavailable && <Text style={styles.warning}>Для отправки командировки нужно обновить сервер qwork.</Text>}
       <Notice message={action.error} />
-      <View style={styles.choices}>
-        <Button selected disabled={!ready || action.busy} onPress={save}>Создать командировку</Button>
-        <Button disabled={action.busy} onPress={onCancel}>Отмена</Button>
-      </View>
-    </Card>
+      <Button selected disabled={!ready || action.busy} onPress={save}>
+        {action.busy ? 'Отправляем…' : 'Отправить сотруднику'}
+      </Button>
+    </View>
   );
 }
 
@@ -491,32 +463,43 @@ function TripRequestDetails({ item, request, employee, tasks, onBack, onDecided,
   const [declining, setDeclining] = useState(false);
   const [adjusting, setAdjusting] = useState(false);
   const [editingTasks, setEditingTasks] = useState(false);
-  const [days, setDays] = useState(() => ({ start: tripDay(item.plannedStart), end: tripDay(item.plannedEnd) }));
+  const [periodDraft, setPeriodDraft] = useState(() => ({
+    start: new Date(item.plannedStart), end: new Date(item.plannedEnd),
+  }));
+  const [editingBudget, setEditingBudget] = useState(false);
+  const [budgetDraft, setBudgetDraft] = useState(() => tripBudgetDraft(null));
   const [taskIds, setTaskIds] = useState(() => (item.taskIds ?? []).map(String));
   const action = useAction();
   const canDecide = !employee && item.status === 'pending';
   const available = eligibleTripTasks(tasks, item.employeeId);
-  const period = adjusting ? tripPeriod(days.start, days.end) : null;
+  const plannedStart = deadlineToIso(periodDraft.start);
+  const plannedEnd = deadlineToIso(periodDraft.end);
+  const period = adjusting && plannedStart && plannedEnd && plannedEnd > plannedStart ? { plannedStart, plannedEnd } : null;
+  const budget = tripBudgetPayload(budgetDraft);
   const conflicts = item.conflicts;
   const changedDates = item.approvedStart && item.approvedEnd
     && (item.approvedStart !== item.plannedStart || item.approvedEnd !== item.plannedEnd);
 
   function decide(decision) {
     void action.run(async () => {
-      const body = decision === 'approve' ? { decision, ...period, taskIds } : { decision, reason: reason.trim() };
+      const body = decision === 'approve' ? {
+        decision, ...period, taskIds, ...(budget && Object.keys(budget).length ? { budget } : {}),
+      } : { decision, reason: reason.trim() };
       const result = await request(`/trip-requests/${encodeURIComponent(item.id)}/decision`, { method: 'POST', body });
       onDecided(result.request);
     });
   }
 
   return <>
-    <View style={styles.choices}><Button disabled={action.busy} onPress={onBack}>К командировкам</Button></View>
+    <View style={styles.choices}><Button disabled={action.busy} onPress={onBack}>К выездам</Button></View>
     <Card title={item.destination} icon="briefcase">
       <TripStatus status={item.status} isRequest />
       {!employee && <Text style={styles.label}>{item.employeeName}</Text>}
-      <Text style={styles.body}>{formatPeriod(item.approvedStart ?? item.plannedStart, item.approvedEnd ?? item.plannedEnd)}</Text>
-      {changedDates && <Text style={styles.muted}>Запрошенные даты · {formatPeriod(item.plannedStart, item.plannedEnd)}</Text>}
+      <Text style={styles.body}>{tripPlanLabel({ plannedStart: item.approvedStart ?? item.plannedStart,
+        plannedEnd: item.approvedEnd ?? item.plannedEnd })}</Text>
+      {changedDates && <Text style={styles.muted}>Запрошенный период · {tripPlanLabel(item)}</Text>}
       <Text style={styles.body}>{item.purpose}</Text>
+      {item.estimate ? <TripBudgetSummary title={employee ? 'Мой расчёт' : 'Расчёт сотрудника'} value={item.estimate} /> : null}
       {item.reason ? <Text style={styles.muted}>{item.status === 'declined' ? 'Причина отказа' : 'Комментарий'} · {item.reason}</Text> : null}
       {item.status === 'pending' && !adjusting && (conflicts?.shifts?.length > 0 || conflicts?.trips?.length > 0) && <View style={styles.inset}>
         <Text style={styles.label}>Пересечения в графике</Text>
@@ -534,10 +517,24 @@ function TripRequestDetails({ item, request, employee, tasks, onBack, onDecided,
         <Button selected disabled={action.busy || !reason.trim()} onPress={() => decide('decline')}>Отклонить запрос</Button>
         <Button disabled={action.busy} onPress={() => setDeclining(false)}>Отмена</Button>
       </> : <>
-        {adjusting && <TripDates days={days} onChange={setDays} disabled={action.busy} />}
+        {adjusting && <>
+          <DeadlinePicker label="Начало поездки" value={periodDraft.start} required showQuick={false} showHelper={false}
+            disabled={action.busy} onChange={start => setPeriodDraft(previous => ({ ...previous, start }))} />
+          <DeadlinePicker label="Окончание поездки" value={periodDraft.end} required showQuick={false} showHelper={false}
+            disabled={action.busy} onChange={end => setPeriodDraft(previous => ({ ...previous, end }))} />
+          {!period && <Text style={styles.warning}>Окончание должно быть позже начала.</Text>}
+        </>}
         {editingTasks && <TripTaskOptions tasks={available} selected={taskIds} onChange={setTaskIds} disabled={action.busy} />}
+        {editingBudget && <View style={styles.inset}>
+          <Text style={styles.label}>План расходов</Text>
+          {item.estimate && <Button disabled={action.busy} onPress={() => setBudgetDraft(tripBudgetDraft(item.estimate))}>
+            Взять суммы из расчёта сотрудника
+          </Button>}
+          <TripBudgetFields value={budgetDraft} onChange={setBudgetDraft}
+            start={period?.plannedStart ?? item.plannedStart} end={period?.plannedEnd ?? item.plannedEnd} disabled={action.busy} />
+        </View>}
         <Notice message={action.error} />
-        <Button selected disabled={action.busy || (adjusting && !period)} onPress={() => decide('approve')}>
+        <Button selected disabled={action.busy || (adjusting && !period) || !budget} onPress={() => decide('approve')}>
           {adjusting ? 'Согласовать с этими датами' : 'Согласовать'}
         </Button>
         <View style={styles.choices}>
@@ -546,6 +543,9 @@ function TripRequestDetails({ item, request, employee, tasks, onBack, onDecided,
             if (!editingTasks) setTaskIds(taskIds.filter(id => available.some(task => String(task.id) === id)));
             setEditingTasks(!editingTasks);
           }}>{editingTasks ? 'Скрыть заявки' : `Заявки · ${taskIds.length}`}</Button>
+          <Button disabled={action.busy} onPress={() => setEditingBudget(!editingBudget)}>
+            {editingBudget ? 'Свернуть бюджет' : 'Указать бюджет'}
+          </Button>
           <Button disabled={action.busy} onPress={() => setDeclining(true)}>Отклонить</Button>
         </View>
       </>)}
@@ -560,25 +560,35 @@ function TripStatus({ status, isRequest }) {
   return label ? <View style={[styles.badge, tone]}><Text style={styles.badgeText}>{label}</Text></View> : null;
 }
 
-function TripRow({ item, isRequest = false, employee, onPress }) {
-  return <Pressable accessibilityRole="button" onPress={onPress} style={({ pressed }) => [styles.tripRow, pressed && styles.dim]}>
-    <View style={styles.fill}>
-      <Text style={styles.label}>{item.destination}</Text>
-      {!employee && <Text style={styles.muted}>{item.employeeName}</Text>}
-      <Text style={styles.muted}>{formatPeriod(item.plannedStart, item.plannedEnd)}{!isRequest ? ` · заявок ${item.taskCount}` : ''}</Text>
-      <TripStatus status={item.status} isRequest={isRequest} />
-    </View>
-    <Icon name="chevron-right" size={17} color={colors.muted} />
-  </Pressable>;
+export function EmployeeTripInbox({ request, offline, onOpen }) {
+  const { value } = useResource(request, '/trip-offers', offline);
+  const incoming = (value?.offers ?? []).filter(offer => offer.status === 'awaiting_employee');
+  if (!incoming.length) return null;
+  return <Card title={incoming.length === 1 ? 'Новая командировка' : `Новые командировки · ${incoming.length}`} icon="briefcase">
+    <TripOfferPreview offer={incoming[0]} onOpen={() => onOpen(incoming[0].id)} />
+    {incoming.length > 1 && <Button onPress={() => onOpen(null)}>Все командировки</Button>}
+  </Card>;
 }
 
-function TripReport({ id, request, offline, employee, onTask, onBack, onChange, tasks }) {
+function TripReport({ id, request, offline, employee, canEditBudget, onTask, onBack, onChange, tasks, offer }) {
   const report = useResource(request, `/trips/${encodeURIComponent(id)}/report`, offline);
   const action = useAction();
+  const stopAction = useAction();
+  const expenseAction = useAction();
   const [editingTasks, setEditingTasks] = useState(false);
   const [taskIds, setTaskIds] = useState([]);
+  const [budgetDraft, setBudgetDraft] = useState(null);
   const trip = report.value?.trip;
+  const stops = trip?.stops ?? [];
+  const active = trip?.status === 'active';
+  const stopsRemaining = stops.filter(stop => !stop.visitedAt && !stop.skippedAt).length;
+  const busy = action.busy || stopAction.busy || expenseAction.busy;
+  const canEditCalculation = employee ? !trip?.offerId : canEditBudget;
   const available = trip ? eligibleTripTasks(tasks, trip.employeeId) : [];
+  const canAttach = !employee && trip?.status !== 'finished' && (available.length > 0 || editingTasks);
+  const ownBudget = employee ? trip?.estimate : trip?.budget;
+  const budgetPayload = budgetDraft ? tripBudgetPayload(budgetDraft) : null;
+  const budgetTitle = employee ? 'Мой расчёт' : 'План диспетчера';
   function mark(phase) {
     void action.run(async () => {
       await request(`/trips/${encodeURIComponent(id)}/${phase}`, { method: 'POST', body: {} });
@@ -593,64 +603,159 @@ function TripReport({ id, request, offline, employee, onTask, onBack, onChange, 
       await Promise.all([report.reload(), onChange()]);
     });
   }
+  function saveBudget(body) {
+    void action.run(async () => {
+      await request(`/trips/${encodeURIComponent(id)}/${employee ? 'estimate' : 'budget'}`,
+        { method: 'POST', body });
+      setBudgetDraft(null);
+      await Promise.all([report.reload(), onChange()]);
+    });
+  }
+  function recordStop(stopId, body) {
+    return stopAction.run(async () => {
+      const { stop } = await request(`/trips/${encodeURIComponent(id)}/stops/${encodeURIComponent(stopId)}`, { method: 'POST', body });
+      if (stop) report.applyUpdate(current => ({
+        ...current,
+        trip: { ...current.trip, stops: (current.trip.stops ?? []).map(row => row.id === stop.id ? stop : row) },
+      }));
+      await Promise.all([report.reload(), onChange()]);
+    });
+  }
+  function saveActualExpenses(body) {
+    return expenseAction.run(async () => {
+      const { actualExpenses } = await request(`/trips/${encodeURIComponent(id)}/actual-expenses`, { method: 'POST', body });
+      if (actualExpenses) report.applyUpdate(current => ({ ...current, trip: { ...current.trip, actualExpenses } }));
+      await report.reload();
+    });
+  }
   return (
     <>
-      <View style={styles.choices}><Button onPress={onBack}>К командировкам</Button></View>
-      <Notice message={report.error || action.error} />
+      <View style={styles.choices}><Button onPress={onBack}>К выездам</Button></View>
+      <Notice message={report.error || (!budgetDraft && action.error)} />
       {offline && <Text style={styles.warning}>Для обновления отчёта и отметок нужна связь.</Text>}
-      {trip ? (
-        <Card title={trip.destination} icon="briefcase">
+      {trip ? <>
+        <Card title={stops.length ? `Маршрут · ${stops.length} организаций` : trip.destination} icon="briefcase">
           <TripStatus status={trip.status} />
           <Text style={styles.muted}>{trip.employeeName}</Text>
+          {trip.address && trip.address !== trip.destination ? <Text style={styles.body}>{trip.address}</Text> : null}
           {trip.basis && <Text style={styles.body}>Основание · {trip.basis}</Text>}
-          <Text style={styles.body}>Цель · {trip.purpose}</Text>
+          <Text style={styles.label}>Что нужно сделать</Text>
+          <Text style={styles.body}>{trip.purpose}</Text>
+          {trip.comment ? <>
+            <Text style={styles.label}>Комментарий диспетчера</Text>
+            <Text style={styles.body}>{trip.comment}</Text>
+          </> : null}
           <Text style={styles.body}>План · {tripPlanLabel(trip)}</Text>
+          {trip.plannedDays != null && <Text style={styles.muted}>Календарных дней по времени Алматы · {trip.plannedDays}</Text>}
           {trip.startedAt && <Text style={styles.body}>Начало · {formatTime(trip.startedAt)}</Text>}
           {trip.finishedAt && <Text style={styles.body}>Окончание · {formatTime(trip.finishedAt)}</Text>}
-          {employee && trip.status !== 'finished' && <Button selected disabled={offline || action.busy}
+          {employee && trip.status !== 'finished' && <Button selected disabled={offline || busy || (active && stopsRemaining > 0)}
             onPress={() => mark(trip.status === 'planned' ? 'start' : 'finish')}>
             {trip.status === 'planned' ? 'Начать поездку' : 'Завершить поездку'}
           </Button>}
+          {employee && active && stopsRemaining > 0 && <Text style={styles.muted}>
+            Перед завершением отметьте все остановки ниже. Если куда-то не заехали, укажите причину.
+          </Text>}
           {report.value.summary.elapsedMinutes != null && <Text style={styles.body}>
             Длительность командировки · {formatMinutes(report.value.summary.elapsedMinutes)}
           </Text>}
-          <Text style={styles.label}>Заявки · {trip.taskCount}</Text>
+        </Card>
+        {stops.length > 0 && <TripRouteSummary stops={stops} active={active} offline={offline}
+          onMark={employee && active ? recordStop : undefined} busy={busy} error={stopAction.error} />}
+        <Card title="Расходы на поездку" icon="clipboard">
+          <Text style={styles.muted}>Ставка считается за календарные дни по времени Алматы. Проезд, жильё, питание и прочее указываются за всю поездку.</Text>
+          {trip.budget ? <TripBudgetSummary title="План диспетчера" value={trip.budget} /> : null}
+          {trip.estimate ? <TripBudgetSummary title={trip.offerId ? 'Согласованная оплата'
+            : employee ? 'Мой расчёт' : 'Расчёт сотрудника'} value={trip.estimate} /> : null}
+          {!trip.budget && !trip.estimate && <Text style={styles.muted}>Расходы пока не указаны.</Text>}
+          {canEditCalculation && (budgetDraft ? <>
+            <Text style={styles.label}>{budgetTitle}</Text>
+            <TripBudgetFields value={budgetDraft} onChange={setBudgetDraft}
+              start={trip.plannedStart} end={trip.plannedEnd} disabled={offline || action.busy} />
+            <Notice message={action.error} />
+            <View style={styles.choices}>
+              <Button selected disabled={offline || action.busy || !budgetPayload}
+                onPress={() => saveBudget(budgetPayload)}>Сохранить расчёт</Button>
+              <Button disabled={action.busy} onPress={() => setBudgetDraft(null)}>Отмена</Button>
+            </View>
+          </> : <Button disabled={offline || action.busy} onPress={() => setBudgetDraft(tripBudgetDraft(ownBudget))}>
+            {ownBudget ? (employee ? 'Изменить мой расчёт' : 'Изменить план расходов')
+              : (employee ? 'Указать мой расчёт' : 'Заполнить план расходов')}
+          </Button>)}
+        </Card>
+        {trip.actualExpenses && <TripActualExpenses value={trip.actualExpenses} employee={employee}
+          canEdit={employee && (active || trip.status === 'finished')} offline={offline} busy={busy}
+          error={expenseAction.error} onSave={saveActualExpenses} />}
+        {(report.value.tasks.length > 0 || canAttach) && <Card title="Связанные заявки" icon="clipboard">
           {report.value.tasks.length > 0 && <Text style={styles.muted}>
             Принято · {report.value.summary.completed}. На проверке · {report.value.summary.awaitingReview}.
           </Text>}
-          {report.value.tasks.map(task => <TaskLink key={task.id} task={task} onTask={onTask} />)}
-          {!employee && trip.status !== 'finished' && <>
-            {editingTasks ? <>
-              <TripTaskOptions tasks={available} selected={taskIds} onChange={setTaskIds} disabled={action.busy} />
-              <Button selected disabled={action.busy || !taskIds.length} onPress={attach}>Сохранить заявки</Button>
-              <Button disabled={action.busy} onPress={() => { setTaskIds([]); setEditingTasks(false); }}>Отмена</Button>
-            </> : <Button onPress={() => setEditingTasks(true)}>Добавить заявки</Button>}
-          </>}
-        </Card>
-      ) : !offline && !report.error ? <Text style={styles.muted}>Загружаем отчёт…</Text> : null}
+          {report.value.tasks.map(task => <TaskLink key={task.id} task={task}
+            onTask={onTask ? taskId => onTask(taskId, { tripId: id }) : undefined} />)}
+          {canAttach && (editingTasks ? <>
+            <TripTaskOptions tasks={available} selected={taskIds} onChange={setTaskIds} disabled={action.busy} />
+            <Button selected disabled={offline || action.busy || !taskIds.length} onPress={attach}>Сохранить связь</Button>
+            <Button disabled={action.busy} onPress={() => { setTaskIds([]); setEditingTasks(false); }}>Отмена</Button>
+          </> : <Button disabled={offline || action.busy} onPress={() => setEditingTasks(true)}>
+            Привязать существующую заявку · необязательно
+          </Button>)}
+        </Card>}
+        <TripOfferHistory history={offer?.history} />
+      </> : !offline && !report.error ? <Text style={styles.muted}>Загружаем отчёт…</Text> : null}
     </>
   );
 }
 
-function TripsPanel({ request, employee = false, employees = [], tasks = [], offline = false, onTask,
-  id, setId, onChange, initialView = 'list', initialRequestId = null }) {
+function TripsPanel({ request, employee = false, employees = [], objects = [], tasks = [], offline = false, onTask,
+  id, setId, onChange, initialOfferId = null, initialRequestId = null, canEditBudget = false, canDispatch = false,
+  filter, onFilter, onControl, onCreateTask, sampleStaff }) {
   const list = useResource(request, '/trips', offline);
   const requests = useResource(request, '/trip-requests', offline);
-  const [creating, setCreating] = useState(initialView === 'request');
+  const offers = useResource(request, '/trip-offers', offline);
+  const [creating, setCreating] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [offerId, setOfferId] = useState(initialOfferId);
+  const [recentOffer, setRecentOffer] = useState(null);
   const [requestId, setRequestId] = useState(initialRequestId);
   const [recentRequest, setRecentRequest] = useState(null);
-  const [showHistory, setShowHistory] = useState(false);
   const allRequests = requests.value?.requests ?? [];
   const listedRequest = allRequests.find(item => item.id === requestId);
   const optimistic = recentRequest?.id === requestId ? recentRequest : null;
   const chosenRequest = optimistic && (!listedRequest || (listedRequest.status === 'pending' && optimistic.status !== 'pending'))
     ? optimistic : listedRequest;
   const requestsUnavailable = requests.errorStatus === 404;
+  const offersUnavailable = offers.errorStatus === 404;
+  const offerError = offersUnavailable ? 'Назначения станут доступны после обновления сервера.' : offers.error;
+  const fetchedOffers = offers.value?.offers ?? [];
+  const fetchedRevision = fetchedOffers.find(item => item.id === recentOffer?.id)?.revision ?? 0;
+  const allOffers = recentOffer && recentOffer.revision > fetchedRevision
+    ? [recentOffer, ...fetchedOffers.filter(item => item.id !== recentOffer.id)] : fetchedOffers;
+  const chosenOffer = allOffers.find(item => item.id === offerId);
   async function refresh() {
-    await Promise.all([list.reload(), requests.reload(), onChange?.()]);
+    await Promise.all([list.reload(), requests.reload(), offers.reload(), onChange?.()]);
+  }
+  function changeOffer(offer) {
+    setRecentOffer(offer);
+    void refresh();
+  }
+  function openConfirmedTrip(next) {
+    setOfferId(null);
+    setId(next);
   }
   if (id) return <TripReport key={id} id={id} request={request} employee={employee} offline={offline}
-    onTask={onTask} onBack={() => setId(null)} onChange={refresh} tasks={tasks} />;
+    canEditBudget={canEditBudget} onTask={onTask && ((taskId, options) => onTask(taskId, { ...options, view: filter }))}
+    onBack={() => setId(null)} onChange={refresh} tasks={tasks}
+    offer={allOffers.find(offer => offer.tripId && String(offer.tripId) === String(id))} />;
+  if (offerId) {
+    const Details = employee ? TripOfferCard : DispatcherTripOffer;
+    return chosenOffer ? <Details key={offerId} offer={chosenOffer} employee={employee} request={request}
+      offline={offline} canDispatch={canDispatch} onChanged={changeOffer} onTrip={openConfirmedTrip}
+      onBack={() => setOfferId(null)} /> : <Card title="Назначение на командировку" icon="briefcase">
+      <Notice message={offerError || (offers.value && 'Назначение не найдено.')} />
+      {!offers.value && !offerError && <Text style={styles.muted}>{offline ? 'Для просмотра нужна связь.' : 'Загружаем назначение…'}</Text>}
+      <Button onPress={() => setOfferId(null)}>К выездам</Button>
+    </Card>;
+  }
   if (requestId) return chosenRequest ? <TripRequestDetails key={requestId} item={chosenRequest} request={request}
     employee={employee} tasks={tasks} onBack={() => { setRequestId(null); setRecentRequest(null); }}
     onTrip={next => { setRequestId(null); setRecentRequest(null); setId(next); }}
@@ -661,97 +766,74 @@ function TripsPanel({ request, employee = false, employees = [], tasks = [], off
     }} /> : <Card title="Запрос на командировку" icon="briefcase">
     <Notice message={requests.error || (requests.value && 'Запрос не найден.')} />
     {!requests.value && !requests.error && <Text style={styles.muted}>{offline ? 'Для просмотра нужна связь.' : 'Загружаем запрос…'}</Text>}
-    <Button onPress={() => setRequestId(null)}>К командировкам</Button>
+    <Button onPress={() => setRequestId(null)}>К выездам</Button>
   </Card>;
-  if (creating && employee) return <TripRequestForm request={request} tasks={tasks} trips={list.value?.trips ?? []}
-    offline={offline} unavailable={requestsUnavailable}
-    onCancel={() => setCreating(false)} onSubmitted={item => {
-      setRecentRequest(item);
-      setRequestId(item.id);
+  if (creating && canDispatch) return <TripForm request={request} employees={employees} objects={objects} offline={offline}
+    serverUnavailable={offersUnavailable} supportsRoutes={offers.value?.supportsTripRoutes === true}
+    onCancel={() => setCreating(false)} onCreated={(next, offer) => {
       setCreating(false);
-      void refresh();
+      setOfferId(next);
+      changeOffer(offer);
     }} />;
-  if (creating) return <TripForm request={request} employees={employees} tasks={tasks}
-    onCancel={() => setCreating(false)} onCreated={next => { setCreating(false); setId(next); void refresh(); }} />;
-  const trips = list.value?.trips ?? [];
-  const now = Date.now();
-  const current = trips.filter(trip => trip.status !== 'finished').sort((a, b) => {
-    if ((a.status === 'active') !== (b.status === 'active')) return a.status === 'active' ? -1 : 1;
-    const overdueA = +new Date(a.plannedEnd) < now;
-    const overdueB = +new Date(b.plannedEnd) < now;
-    if (overdueA !== overdueB) return overdueA ? 1 : -1;
-    return a.plannedStart.localeCompare(b.plannedStart);
-  });
-  const otherTrips = employee ? current.slice(1) : current;
-  const pending = allRequests.filter(item => item.status === 'pending');
-  const history = [
-    ...trips.filter(trip => trip.status === 'finished').map(item => ({ item, isRequest: false })),
-    ...allRequests.filter(item => item.status === 'declined').map(item => ({ item, isRequest: true })),
-  ].sort((a, b) => (b.item.finishedAt ?? b.item.decidedAt ?? b.item.plannedStart)
-    .localeCompare(a.item.finishedAt ?? a.item.decidedAt ?? a.item.plannedStart));
-  return (
-    <View style={styles.screen}>
-      <Card title={employee ? 'Мои командировки' : 'Командировки'} icon="briefcase">
-        {employee && <Text style={styles.muted}>Ближайшие поездки и запросы на согласовании.</Text>}
-        {offline && <Text style={styles.warning}>Для обновления командировок нужна связь.</Text>}
-        <Notice message={list.error || (requestsUnavailable ? 'Запросы станут доступны после обновления сервера.' : requests.error)} />
-        {employee && current[0] && <View style={styles.inset}>
-          <Text style={styles.muted}>{current[0].status === 'active' ? 'Текущая поездка'
-            : +new Date(current[0].plannedEnd) < now ? 'Срок поездки прошёл' : 'Ближайшая поездка'}</Text>
-          <TripRow item={current[0]} employee onPress={() => setId(current[0].id)} />
-        </View>}
-        <Button selected disabled={offline || (employee ? !requests.value : !employees.length)} onPress={() => setCreating(true)}>
-          {employee ? 'Запросить командировку' : 'Добавить командировку'}
-        </Button>
-      </Card>
-      {pending.length > 0 && <Card title={`На согласовании · ${pending.length}`} icon="clock">
-        {pending.map(item => <TripRow key={item.id} item={item} isRequest employee={employee} onPress={() => setRequestId(item.id)} />)}
-      </Card>}
-      {otherTrips.length > 0 && <Card title={employee ? 'Другие поездки' : 'Текущие и запланированные'} icon="calendar">
-        {otherTrips.map(item => <TripRow key={item.id} item={item} employee={employee} onPress={() => setId(item.id)} />)}
-      </Card>}
-      {history.length > 0 && <Card title="История" icon="clipboard">
-        <Button onPress={() => setShowHistory(!showHistory)}>{showHistory ? 'Свернуть историю' : `Показать историю · ${history.length}`}</Button>
-        {showHistory && history.map(({ item, isRequest }) => <TripRow key={`${isRequest ? 'request' : 'trip'}-${item.id}`}
-          item={item} isRequest={isRequest} employee={employee} onPress={() => (isRequest ? setRequestId : setId)(item.id)} />)}
-      </Card>}
-      {list.value && (requests.value || requestsUnavailable) && !current.length && !pending.length && !history.length
-        && <Text style={styles.muted}>Командировок пока нет.</Text>}
-      {!list.value && !offline && !list.error && <Text style={styles.muted}>Загружаем командировки…</Text>}
-    </View>
-  );
+  if (importing && canDispatch) return <View style={styles.screen}>
+    <View style={styles.choices}><Button onPress={() => setImporting(false)}>‹ К командировкам</Button></View>
+    <TripImport request={request} offline={offline} onImported={offers.reload} />
+  </View>;
+  return <View style={styles.screen}>
+    {offline && <Text style={styles.warning}>Офлайн · показываем доступные выезды. Для обновления нужна связь.</Text>}
+    <Notice message={list.error || offerError || (requestsUnavailable ? '' : requests.error)} />
+    <FieldVisitsOverview tasks={tasks} trips={list.value?.trips} offers={allOffers} requests={allRequests}
+      taskStatuses={TASK_STATUS} employee={employee} canDispatch={canDispatch} filter={filter} onFilter={onFilter}
+      loading={Boolean(request && !offline && filter !== 'assignments' && !list.value && !list.error)}
+      onTask={onTask && (taskId => onTask(taskId, { view: filter }))} onTrip={setId} onOffer={setOfferId} onRequest={setRequestId}
+      onCreateTask={onCreateTask} onCreateTrip={canDispatch ? () => setCreating(true) : undefined}
+      onImportTrip={canDispatch && offers.value?.supportsTripImport === true ? () => {
+        onFilter('trips');
+        setImporting(true);
+      } : undefined} onControl={onControl} />
+    {!employee && sampleStaff && <Card title="Тестовая команда" icon="users">
+      <Text style={styles.muted}>{sampleStaff.names.join(' · ')}</Text>
+      <Button disabled={offline || sampleStaff.busy} onPress={sampleStaff.onAdd}>
+        {sampleStaff.busy ? 'Добавляем сотрудников…' : 'Добавить тестовых сотрудников'}
+      </Button>
+      <Notice message={sampleStaff.error} />
+    </Card>}
+  </View>;
 }
 
-export function EmployeeTrips({ request, offline = false, onTask, tasks = [], initialView = 'list',
-  initialTripId = null, initialRequestId = null }) {
+export function EmployeeTrips({ request, offline = false, onTask, tasks = [], initialTripId = null,
+  initialRequestId = null, initialOfferId = null, initialView = 'all' }) {
   const [id, setId] = useState(initialTripId);
+  const [filter, setFilter] = useState(initialView);
   return <TripsPanel employee request={request} offline={offline} id={id} setId={setId} onTask={onTask}
-    tasks={tasks} initialView={initialView} initialRequestId={initialRequestId} />;
+    tasks={tasks} filter={filter} onFilter={setFilter} initialOfferId={initialOfferId} initialRequestId={initialRequestId} />;
 }
 
-export function OfficeFieldOperations({ request, tasks, onTask }) {
-  const [tab, setTab] = useState('board');
-  const [id, setId] = useState(null);
-  const board = useResource(request, '/field-control');
-  const tripsTasks = board.value?.tasks ?? tasks ?? [];
-  function openTrip(tripId) {
-    setId(tripId);
-    setTab('trips');
+export function OfficeFieldOperations({ request, tasks = [], employees = [], objects = [], role = 'dispatcher',
+  onTask, onCreateTask, initialTab = 'all', initialTripId = null, onTabChange, sampleStaff }) {
+  const [filter, setFilter] = useState(initialTab === 'board' ? 'all' : initialTab);
+  const [control, setControl] = useState(initialTab === 'board' && !initialTripId);
+  const [id, setId] = useState(initialTripId);
+  const roster = employees.filter(person => person.role === 'employee');
+  const board = useResource(request, '/field-control', !control && roster.length > 0);
+  function selectFilter(next) {
+    setFilter(next);
+    setControl(false);
+    onTabChange?.(next);
   }
-  return (
-    <View style={styles.screen}>
-      <View style={styles.choices}>
-        <Button selected={tab === 'board'} onPress={() => setTab('board')}>Доска контроля</Button>
-        <Button selected={tab === 'trips'} onPress={() => setTab('trips')}>Командировки</Button>
-      </View>
-      <Notice message={board.error} />
-      {tab === 'board' ? (
-        board.value ? <FieldBoard board={board.value} request={request} reload={board.reload} onTask={onTask} onTrip={openTrip} />
-          : !board.error ? <Text style={styles.muted}>Загружаем полевые работы…</Text> : null
-      ) : <TripsPanel request={request} employees={board.value?.employees} tasks={tripsTasks}
-        id={id} setId={setId} onTask={onTask} onChange={board.reload} />}
-    </View>
-  );
+
+  if (control) return <View style={styles.screen}>
+    <View style={styles.choices}><Button onPress={() => selectFilter(filter)}>‹ К выездам</Button></View>
+    <Notice message={board.error} />
+    {board.value ? <FieldBoard board={board.value} request={request} reload={board.reload} onTask={onTask}
+      onTrip={tripId => { setId(tripId); selectFilter('trips'); }} />
+      : !board.error ? <Text style={styles.muted}>Загружаем выездные работы…</Text> : null}
+  </View>;
+
+  return <TripsPanel request={request} objects={objects} employees={roster.length ? roster : board.value?.employees}
+    tasks={tasks} id={id} setId={setId} onTask={onTask} onChange={board.reload} canEditBudget canDispatch={role === 'dispatcher'}
+    filter={filter} onFilter={selectFilter} sampleStaff={sampleStaff} onCreateTask={onCreateTask}
+    onControl={() => { setControl(true); onTabChange?.('board'); }} />;
 }
 
 const styles = StyleSheet.create({
@@ -774,7 +856,6 @@ const styles = StyleSheet.create({
   metricValue: { color: colors.ink, fontWeight: '700', fontSize: 17 },
   inset: { backgroundColor: '#F8FAFD', borderRadius: 9, padding: 10, gap: 7 },
   taskRow: { flexDirection: 'row', alignItems: 'center', gap: 7, borderTopColor: colors.border, borderTopWidth: 1, paddingVertical: 8 },
-  tripRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 9, minHeight: 48 },
   badge: { alignSelf: 'flex-start', backgroundColor: colors.tint, borderRadius: 6, paddingHorizontal: 7, paddingVertical: 4 },
   badgePending: { backgroundColor: '#FFF1D9' },
   badgeDeclined: { backgroundColor: '#FDEDEF' },
@@ -782,16 +863,13 @@ const styles = StyleSheet.create({
   badgeText: { color: colors.ink, fontSize: 11, fontWeight: '700' },
   input: { minHeight: 42, color: colors.ink, fontSize: 14, backgroundColor: '#F4F7FB', paddingHorizontal: 10, borderRadius: 8 },
   multiline: { minHeight: 74, paddingVertical: 10, textAlignVertical: 'top' },
-  dateRow: { flexDirection: 'row', gap: 8 },
-  dateField: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 7, minHeight: 55, padding: 9,
-    borderRadius: 8, backgroundColor: colors.canvas, borderWidth: 1, borderColor: colors.border },
-  dateOverlay: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(20,32,52,0.35)' },
-  dateSheet: { backgroundColor: '#fff', borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingTop: 12 },
-  dateToolbar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 12, gap: 8 },
-  nativeDatePicker: { alignSelf: 'stretch', height: 336 },
   taskOption: { flexDirection: 'row', alignItems: 'center', minHeight: 44, borderWidth: 1, borderColor: colors.border,
     borderRadius: 8, paddingHorizontal: 10, paddingVertical: 8, gap: 8 },
   taskOptionChecked: { backgroundColor: colors.tint, borderColor: colors.blue },
+  picker: { gap: 7 },
+  pickerButton: { flexDirection: 'row', alignItems: 'center', minHeight: 54, gap: 9,
+    padding: 9, borderRadius: 10, backgroundColor: colors.canvas, borderWidth: 1, borderColor: colors.border },
+  pickerIcon: { width: 34, height: 34, borderRadius: 9, backgroundColor: colors.tint, alignItems: 'center', justifyContent: 'center' },
   error: { color: '#AA262A', backgroundColor: '#FFF1F3', borderRadius: 8, padding: 8, fontSize: 13 },
   warning: { color: '#825114', fontSize: 12 },
   success: { color: '#166947', fontSize: 12 },

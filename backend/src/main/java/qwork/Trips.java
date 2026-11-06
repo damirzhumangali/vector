@@ -221,6 +221,7 @@ final class Trips {
         } else if ("finish".equals(action)) {
             if (row.get("started_at") == null) throw error(409, "Сначала отметьте начало командировки.");
             if (row.get("finished_at") == null) {
+                TripRoutes.requireCompleted(db, user, id);
                 Db.update(db, "UPDATE work_trips SET finished_at = ? WHERE id = ?", now(), id);
             }
         } else {
@@ -251,6 +252,8 @@ final class Trips {
         }
         var trip = json(row);
         trip.put("taskCount", tasks.size());
+        trip.put("stops", TripRoutes.forTrip(db, user, id));
+        trip.put("actualExpenses", TripActualExpenses.read(db, row));
         Long elapsed = null;
         if (row.get("finished_at") instanceof String finish && row.get("started_at") instanceof String start) {
             elapsed = Duration.between(Instant.parse(start), Instant.parse(finish)).toMinutes();
@@ -292,7 +295,7 @@ final class Trips {
         return row.get("started_at") == null ? "planned" : "active";
     }
 
-    private static Map<String, Object> find(Connection db, Map<String, Object> user, long id) throws SQLException {
+    static Map<String, Object> find(Connection db, Map<String, Object> user, long id) throws SQLException {
         var row = Db.one(db, SELECT + " AND trip.id = ?", number(user, "company_id"), id);
         if (row == null || (isEmployee(user) && number(row, "employee_id") != number(user, "id"))) {
             throw error(404, "Командировка не найдена.");

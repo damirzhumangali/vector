@@ -18,7 +18,7 @@ import PlanningScreens from './PlanningScreens';
 import AnalyticsScreens from './AnalyticsScreens';
 import DeadlinePicker, { deadlineToIso } from './DeadlinePicker';
 import FieldReport, { PRIORITY_LABELS } from './FieldReport';
-import { OfficeFieldOperations } from './FieldOperations';
+import { OfficeFieldOperations, VisitOptionPicker } from './FieldOperations';
 import RepresentativeReview from './RepresentativeReview';
 import { Icon, colors } from './ui';
 
@@ -163,13 +163,13 @@ function Dashboard({ tasks, employees, session, manager, onOpen, onTask }) {
     ['check', 'Приёмка работ', `${pending.length} на проверке`, 'tasks', '#E9F3FF', colors.blue],
     ['chart', 'Аналитика', 'Показатели и отчёты', 'analytics', '#E8F9F0', '#1FB87D'],
     ['calendar', 'Смены и ситуации', 'График и согласования', 'operations', '#FFF1E8', '#F28B39'],
-    ['pin', 'Выездной контроль', 'Доска и командировки', 'field-operations', '#EAF4FF', colors.blue],
+    ['briefcase', 'Командировки', 'Поездки и выездные работы', 'field-operations', '#EAF4FF', colors.blue],
   ] : [
     ['clipboard', 'Заявки', `${active.length} активных работ`, 'tasks', '#E9F3FF', colors.blue],
     ['users', 'Команда', `${employees.filter(person => person.role === 'employee').length} сотрудников`, 'team', '#E8F9F0', '#1FB87D'],
     ['calendar', 'Плановые работы', 'Шаблоны и импорт Excel', 'planning', '#FFF1E8', '#F28B39'],
     ['clock', 'Смены и ситуации', 'График и дежурства', 'operations', '#FFF8E3', '#E7A314'],
-    ['pin', 'Выездной контроль', 'Доска и командировки', 'field-operations', '#EAF4FF', colors.blue],
+    ['briefcase', 'Командировки', 'Назначение поездок и согласование', 'field-operations', '#EAF4FF', colors.blue],
   ];
   return <>
     <View style={styles.todayCard}>
@@ -238,7 +238,7 @@ function ArrivalSettings({ value, onChange, disabled = false }) {
   </View>;
 }
 
-function TaskForm({ onCreate, onCancel, employees, objects, onCreateObject, request, server, busy, error }) {
+function TaskForm({ onCreate, onCancel, employees, objects, onCreateObject, request, server, busy, error, fieldVisit }) {
   const [title, setTitle] = useState('');
   const [purpose, setPurpose] = useState('');
   const [priority, setPriority] = useState(2);
@@ -258,7 +258,9 @@ function TaskForm({ onCreate, onCancel, employees, objects, onCreateObject, requ
   const [latitude, setLatitude] = useState('');
   const [longitude, setLongitude] = useState('');
   const [radius, setRadius] = useState(100);
+  const [scheduledValue, setScheduledValue] = useState(null);
   const [deadlineValue, setDeadlineValue] = useState(null);
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [validation, setValidation] = useState('');
   const objectInput = useRef(null);
   const descriptionInput = useRef(null);
@@ -282,7 +284,7 @@ function TaskForm({ onCreate, onCancel, employees, objects, onCreateObject, requ
   const location = hasPoint && Number.isFinite(meters) && meters >= 1 && meters <= 10000
     ? { latitude: lat, longitude: lon, radius: meters } : null;
   const canCreate = Boolean(title.trim() && (server
-    ? purpose.trim() && (selectedObject || location) && selectedAssignee
+    ? purpose.trim() && (selectedObject || location) && selectedAssignee && (!fieldVisit || scheduledValue)
     : object.trim()));
 
   useEffect(() => {
@@ -328,9 +330,18 @@ function TaskForm({ onCreate, onCancel, employees, objects, onCreateObject, requ
 
   function submit() {
     if (!canCreate || busy || rulesBusy) return;
+    const scheduledAt = deadlineToIso(scheduledValue);
     const deadline = deadlineToIso(deadlineValue);
+    if (fieldVisit && (!scheduledAt || +scheduledValue <= Date.now())) {
+      setValidation('Выберите будущие дату и время начала выезда.');
+      return;
+    }
     if (deadlineValue && (!deadline || +deadlineValue <= Date.now())) {
       setValidation('Выберите дату и время позже текущего.');
+      return;
+    }
+    if (scheduledAt && deadline && +deadlineValue <= +scheduledValue) {
+      setValidation('Срок выполнения должен быть позже начала выезда.');
       return;
     }
     const itemTitles = checklistText.split('\n').map(value => value.trim()).filter(Boolean);
@@ -351,6 +362,7 @@ function TaskForm({ onCreate, onCancel, employees, objects, onCreateObject, requ
         ? { objectId: selectedObject.id }
         : { object: object.trim(), address: address.trim(), ...(location && { location }) }),
       ...(deadline && { deadline }),
+      ...(scheduledAt && { scheduledAt }),
     };
     onCreate(server ? {
       ...fields,
@@ -363,7 +375,9 @@ function TaskForm({ onCreate, onCancel, employees, objects, onCreateObject, requ
 
   return (
     <>
-      <Button onPress={() => { Keyboard.dismiss(); onCancel(); }} disabled={busy} secondary>‹ К заявкам</Button>
+      <Button onPress={() => { Keyboard.dismiss(); onCancel(); }} disabled={busy} secondary>
+        {fieldVisit ? '‹ К выездам' : '‹ К заявкам'}
+      </Button>
       <View style={styles.card}>
         <Text style={styles.label}>Название работы</Text>
         <TextInput
@@ -406,12 +420,19 @@ function TaskForm({ onCreate, onCancel, employees, objects, onCreateObject, requ
         {server && (
           <>
             <Text style={styles.muted}>Выберите объект из справочника или отметьте место на карте.</Text>
-            {objects.map((item) => (
-              <Choice key={item.id} selected={item.id === objectId} onPress={() => setObjectId(item.id)}>
-                {item.name}{item.address ? ` · ${item.address}` : ''}
-              </Choice>
-            ))}
-            <Choice selected={!selectedObject} onPress={() => setObjectId(null)}>Точка на карте</Choice>
+            {fieldVisit && objects.length ? (
+              <VisitOptionPicker label="Выбрать место" icon="pin" selected={objectId ?? 'map'}
+                disabled={busy} onSelect={id => setObjectId(id === 'map' ? null : id)}
+                options={[{ id: 'map', label: 'Точка на карте' },
+                  ...objects.map(item => ({ id: item.id, label: item.name, detail: item.address }))]} />
+            ) : <>
+              {objects.map((item) => (
+                <Choice key={item.id} selected={item.id === objectId} onPress={() => setObjectId(item.id)}>
+                  {item.name}{item.address ? ` · ${item.address}` : ''}
+                </Choice>
+              ))}
+              {!fieldVisit && <Choice selected={!selectedObject} onPress={() => setObjectId(null)}>Точка на карте</Choice>}
+            </>}
           </>
         )}
         {selectedObject ? (
@@ -456,13 +477,20 @@ function TaskForm({ onCreate, onCancel, employees, objects, onCreateObject, requ
         )}
       </View>
       <View style={styles.card}>
+        {fieldVisit && <DeadlinePicker value={scheduledValue} disabled={busy}
+          label="Дата и время начала" required showQuick={false} showHelper={false}
+          onChange={value => { setScheduledValue(value); setValidation(''); }} />}
         <DeadlinePicker value={deadlineValue} disabled={busy}
           onChange={value => { setDeadlineValue(value); setValidation(''); }} />
       </View>
       {server && (
         <View style={styles.card}>
           <Text accessibilityRole="header" style={styles.cardTitle}>Исполнитель</Text>
-          {employees.length ? employees.map((employee) => (
+          {employees.length && fieldVisit ? (
+            <VisitOptionPicker label="Назначить сотрудника" icon="user" selected={assigneeId}
+              disabled={busy} onSelect={setAssigneeId}
+              options={employees.map(employee => ({ id: employee.id, label: employee.name, detail: employee.department }))} />
+          ) : employees.length ? employees.map((employee) => (
             <Choice
               key={employee.id}
               selected={employee.id === assigneeId}
@@ -475,7 +503,10 @@ function TaskForm({ onCreate, onCancel, employees, objects, onCreateObject, requ
           )}
         </View>
       )}
-      {server && request && (
+      {server && fieldVisit && <Button secondary disabled={busy} onPress={() => setShowAdvanced(value => !value)}>
+        {showAdvanced ? 'Скрыть настройки выезда' : 'Руководитель и настройки отчёта'}
+      </Button>}
+      {server && request && (!fieldVisit || showAdvanced) && (
         <View style={styles.card}>
           <Text accessibilityRole="header" style={styles.cardTitle}>Ответственный руководитель</Text>
           <Choice selected={managerId === undefined} onPress={() => setManagerId(undefined)}>
@@ -509,7 +540,7 @@ function TaskForm({ onCreate, onCancel, employees, objects, onCreateObject, requ
           )}
         </View>
       )}
-      {server && (
+      {server && (!fieldVisit || showAdvanced) && (
         <View style={styles.card}>
           <Text accessibilityRole="header" style={styles.cardTitle}>Содержание отчёта</Text>
           <Text style={styles.muted}>По умолчанию будут стандартный чек-лист и одна пара фото «до» и «после».</Text>
@@ -533,7 +564,9 @@ function TaskForm({ onCreate, onCancel, employees, objects, onCreateObject, requ
         </View>
       )}
       <RequestError message={validation || error} />
-      <Button onPress={submit} disabled={!canCreate || busy || rulesBusy}>{busy ? 'Создаём…' : 'Создать заявку'}</Button>
+      <Button onPress={submit} disabled={!canCreate || busy || rulesBusy}>
+        {busy ? 'Создаём…' : fieldVisit ? 'Назначить выезд' : 'Создать заявку'}
+      </Button>
     </>
   );
 }
@@ -1097,7 +1130,8 @@ function StaffDirectory({ employees, onRenew, onEditDepartment, onResetPassword,
 export default function OfficeScreens({
   role, tasks, setTasks, session, employees = [], onCreateTask, onUpdateTask, onCreateEmployee,
   onCancelTask, onRepeatTask, onRenewInvite, onSetDepartment, onResetPassword, objects = [], onCreateObject,
-  request, imageSource, onUploadPhoto, onPhotoRejected, onImportedTasks, section = 'home', onSectionChange, navigationId = 0,
+  request, imageSource, onUploadPhoto, onPhotoRejected, onImportedTasks, sampleStaff,
+  section = 'home', onSectionChange, navigationId = 0,
 }) {
   const [creating, setCreating] = useState(section === 'home' ? 'overview' : section === 'tasks' ? null : section);
   const internalNavigation = useRef(null);
@@ -1111,6 +1145,8 @@ export default function OfficeScreens({
   const server = Boolean(session);
   const assignees = employees.filter((employee) => employee.role === 'employee');
   const [selectedId, setSelectedId] = useState(null);
+  const [visitTripId, setVisitTripId] = useState(null);
+  const [visitTab, setVisitTab] = useState('all');
   const [reportOpen, setReportOpen] = useState(false);
   const [departmentEmployeeId, setDepartmentEmployeeId] = useState(null);
   const [passwordEmployeeId, setPasswordEmployeeId] = useState(null);
@@ -1122,6 +1158,7 @@ export default function OfficeScreens({
   const importing = creating === 'import-tasks';
   const analytics = creating === 'analytics';
   const fieldOperations = creating === 'field-operations';
+  const fieldTask = creating === 'field-task';
   const departmentEmployee = employees.find(employee => employee.id === departmentEmployeeId);
   const passwordEmployee = employees.find(employee => employee.id === passwordEmployeeId);
   const selected = tasks.find((task) => task.id === selectedId);
@@ -1147,6 +1184,8 @@ export default function OfficeScreens({
     internalNavigation.current = null;
     setCreating(section === 'home' ? 'overview' : section === 'tasks' ? null : section);
     setSelectedId(null);
+    setVisitTripId(null);
+    setVisitTab('all');
     setReportOpen(false);
     setError('');
   }, [section, navigationId]);
@@ -1159,6 +1198,8 @@ export default function OfficeScreens({
     }
     setCreating(next);
     setSelectedId(null);
+    if (next !== 'field-operations') setVisitTripId(null);
+    if (next === 'field-operations' && !fieldOperations && !fieldTask) setVisitTab('all');
     setReportOpen(false);
     setError('');
   }
@@ -1267,8 +1308,9 @@ export default function OfficeScreens({
     setSelectedId(null);
   }
 
-  function openTask(id) {
-    navigate(null);
+  function openTask(id, options) {
+    if (fieldOperations && !selected && id) setVisitTripId(options?.tripId ?? null);
+    navigate(fieldOperations || fieldTask ? 'field-operations' : null);
     setSelectedId(id);
   }
 
@@ -1307,10 +1349,10 @@ export default function OfficeScreens({
         <View style={styles.heading}>
           <View style={styles.headingCopy}>
             <Text accessibilityRole="header" style={styles.title}>
-              {selected ? 'Карточка заявки' : creating === 'overview' ? 'Главная' : analytics ? 'Аналитика' : importing ? 'Импорт Excel' : planning ? 'Плановые работы' : operations ? 'Рабочее время' : fieldOperations ? 'Выездной контроль' : creating === 'team' ? 'Команда' : creating === 'task' ? 'Новая заявка' : creating ? 'Доступ сотрудника' : manager ? 'Приёмка работ' : 'Заявки'}
+              {selected ? 'Карточка заявки' : creating === 'overview' ? 'Главная' : analytics ? 'Аналитика' : importing ? 'Импорт Excel' : planning ? 'Плановые работы' : operations ? 'Рабочее время' : fieldOperations ? 'Выезды' : fieldTask ? 'Новое выездное задание' : creating === 'team' ? 'Команда' : creating === 'task' ? 'Новая заявка' : creating ? 'Доступ сотрудника' : manager ? 'Приёмка работ' : 'Заявки'}
             </Text>
             <Text style={styles.subtitle}>
-              {selected ? `Заявка №${selected.id}` : creating === 'overview' ? 'Все рабочие дела в одном месте' : analytics ? 'Статистика выполнения и выездов' : importing ? 'Загрузите таблицу и создайте несколько заявок сразу' : planning ? 'Повторяющиеся работы и автоназначение' : operations ? 'График, дежурства и согласования' : fieldOperations ? 'Отметки сотрудников, отклонения и командировки' : creating === 'team' ? 'Сотрудники и доступ к компании' : creating === 'task' ? 'Поставьте задачу сотруднику' : creating ? 'Настройте доступ к рабочему пространству' : manager ? 'Проверяйте отчёты сотрудников' : 'Постановка и контроль выездных работ'}
+              {selected ? `Заявка №${selected.id}` : creating === 'overview' ? 'Все рабочие дела в одном месте' : analytics ? 'Статистика выполнения и выездов' : importing ? 'Загрузите таблицу и создайте несколько заявок сразу' : planning ? 'Повторяющиеся работы и автоназначение' : operations ? 'График, дежурства и согласования' : fieldOperations ? 'Выездные задания и командировки' : fieldTask ? 'Выберите место, исполнителя и время выезда' : creating === 'team' ? 'Сотрудники и доступ к компании' : creating === 'task' ? 'Поставьте задачу сотруднику' : creating ? 'Настройте доступ к рабочему пространству' : manager ? 'Проверяйте отчёты сотрудников' : 'Постановка и контроль выездных работ'}
             </Text>
           </View>
           {!manager && !creating && !selected && <Pressable accessibilityRole="button" accessibilityLabel="Создать заявку" onPress={() => openForm('task')} style={styles.addButton}><Icon name="plus" color="#FFFFFF" size={24} /></Pressable>}
@@ -1333,7 +1375,7 @@ export default function OfficeScreens({
         {selected && (
           <>
             <Button onPress={() => openTask(null)} disabled={busy} secondary>
-              {manager ? '‹ К списку отчётов' : '‹ К заявкам'}
+              {fieldOperations ? '‹ К выездам' : manager ? '‹ К списку отчётов' : '‹ К заявкам'}
             </Button>
             <TaskDetails task={selected} />
             <Button onPress={() => setReportOpen(true)} disabled={busy} secondary>Открыть отчёт по выезду</Button>
@@ -1409,11 +1451,21 @@ export default function OfficeScreens({
           </>
         )}
 
-        {fieldOperations && server && request && (
-          <>
-            <Button onPress={() => openForm('overview')} secondary>‹ На главную</Button>
-            <OfficeFieldOperations request={request} tasks={tasks} onTask={id => openTask(String(id))} />
-          </>
+        {fieldOperations && !selected && server && request && (
+          <OfficeFieldOperations request={request} tasks={tasks} objects={objects} employees={assignees}
+            role={role} initialTripId={visitTripId} initialTab={visitTab} onTabChange={setVisitTab}
+            onTask={(id, options) => openTask(String(id), options)}
+            sampleStaff={sampleStaff && {
+              names: sampleStaff.names, busy, error, onAdd: () => submit(sampleStaff.onAdd),
+            }}
+            onCreateTask={!manager ? () => openForm('field-task') : undefined} />
+        )}
+        {fieldOperations && !server && !selected && (
+          <View style={styles.emptyCard}>
+            <Icon name="briefcase" size={28} />
+            <Text style={styles.cardTitle}>Выезды компании</Text>
+            <Text style={styles.muted}>Войдите в компанию, чтобы назначать выезды и смотреть командировки.</Text>
+          </View>
         )}
 
         {planning && !manager && server && request && (
@@ -1476,10 +1528,11 @@ export default function OfficeScreens({
           </>
         )}
 
-        {!manager && creating === 'task' && (
+        {!manager && (creating === 'task' || fieldTask) && (
           <TaskForm
             onCreate={createTask}
-            onCancel={() => openForm(null)}
+            onCancel={() => openForm(fieldTask ? 'field-operations' : null)}
+            fieldVisit={fieldTask}
             employees={assignees}
             objects={objects}
             request={request}
@@ -1517,6 +1570,15 @@ export default function OfficeScreens({
 
         {!manager && !creating && !selected && (
           <>
+            {server && <Pressable accessibilityRole="button" onPress={() => openForm('field-operations')}
+              style={({ pressed }) => [styles.navigationRow, pressed && styles.dimmed]}>
+              <View style={styles.todayIcon}><Icon name="briefcase" size={22} /></View>
+              <View style={styles.flex}>
+                <Text style={styles.label}>Перейти к командировкам</Text>
+                <Text style={styles.muted}>Поездки с отдельным заданием и согласованием оплаты</Text>
+              </View>
+              <Icon name="chevron-right" size={18} />
+            </Pressable>}
             {server && request && <Button onPress={() => openForm('import-tasks')} secondary>Импорт Excel</Button>}
             <View style={styles.segmented}>
               {[['all', 'Все'], ['active', 'В работе'], ['review', 'На проверке'], ['overdue', 'Просрочены']].map(([key, label]) => <Pressable

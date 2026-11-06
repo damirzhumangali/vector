@@ -64,7 +64,7 @@ function formatTime(value) {
 }
 
 export function WorkScreens({ task, setTask, onBack, onOpenTask, onLocate, onUploadPhoto, request, imageSource,
-  galleryRevision = task.revision, busy = false, canRefuseTask = false }) {
+  galleryRevision = task.revision, busy = false, canRefuseTask = false, backLabel = 'Задачи' }) {
   const [locating, setLocating] = useState(false);
   const [manualArrival, setManualArrival] = useState(false);
   const [arrivalReason, setArrivalReason] = useState('');
@@ -78,6 +78,7 @@ export function WorkScreens({ task, setTask, onBack, onOpenTask, onLocate, onUpl
   const status = task.status ?? 'assigned';
   const stageIndex = stages.indexOf(status);
   const due = task.deadline ? formatTime(task.deadline) : task.due;
+  const scheduled = task.scheduledAt ? formatTime(task.scheduledAt) : '';
   const checks = DEFAULT_CHECKLIST_TITLES.map((_, index) => Boolean(task.checks?.[index]));
   const checkedCount = checks.filter(Boolean).length;
   const before = Boolean(task.photos?.before);
@@ -204,9 +205,9 @@ export function WorkScreens({ task, setTask, onBack, onOpenTask, onLocate, onUpl
   return (
     <View style={styles.screen}>
       <View style={styles.navigation}>
-        <Pressable accessibilityRole="button" accessibilityLabel="Вернуться к моим задачам" onPress={onBack} style={styles.back}>
+        <Pressable accessibilityRole="button" accessibilityLabel={backLabel === 'Выезды' ? 'Вернуться к выездам' : 'Вернуться к моим задачам'} onPress={onBack} style={styles.back}>
           <Icon name="chevron-left" color={palette.ink} size={22} />
-          <Text style={styles.backText}>Задачи</Text>
+          <Text style={styles.backText}>{backLabel}</Text>
         </Pressable>
         <Text style={styles.navigationTitle}>Карточка задания</Text>
         <View style={styles.navigationSpacer} />
@@ -227,6 +228,12 @@ export function WorkScreens({ task, setTask, onBack, onOpenTask, onLocate, onUpl
               <Text style={styles.metaValue}>{task.object}</Text>
               {task.address ? <Text style={styles.body}>{task.address}</Text> : null}
             </View>
+            {scheduled ? (
+              <View style={styles.metaItem}>
+                <View style={styles.metaLabel}><Icon name="calendar" color={palette.accent} size={16} /><Text style={styles.eyebrow}>Начало по плану</Text></View>
+                <Text style={styles.metaValue}>{scheduled}</Text>
+              </View>
+            ) : null}
             {due ? (
               <View style={styles.metaItem}>
                 <View style={styles.metaLabel}><Icon name="calendar" color={palette.accent} size={16} /><Text style={styles.eyebrow}>Срок выполнения</Text></View>

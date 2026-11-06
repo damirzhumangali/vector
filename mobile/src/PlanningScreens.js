@@ -160,7 +160,7 @@ function TemplateForm({ template, objects, busy, onSave, onCancel }) {
   );
 }
 
-async function pickWorkbook() {
+export async function pickWorkbook() {
   const result = await getDocumentAsync({
     type: '*/*',
     base64: true,

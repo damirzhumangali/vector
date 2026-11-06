@@ -23,7 +23,8 @@ final class ImportSqlite {
         "work_plans", "planned_jobs", "assignment_settings", "planning_imports", "login_registry", "password_resets",
         "field_work_defaults", "task_representative_reviews", "work_trips", "work_trip_tasks", "employee_work_modes",
         "work_trip_requests", "work_trip_request_tasks", "task_assignment_changes", "planning_import_runs",
-        "push_devices", "incident_push_jobs", "work_trip_offers");
+        "push_devices", "incident_push_jobs", "work_trip_offers", "work_trip_offer_history", "work_trip_route_stops",
+        "work_trip_actual_expenses");
     private static final List<Table> TABLES = List.of(
         new Table("companies", "id code name", ""),
         new Table("users", "id company_id name login role is_owner password_hash password_salt",
@@ -48,7 +49,12 @@ final class ImportSqlite {
             "started_at finished_at object_id address budget estimate"),
         new Table("work_trip_offers",
             "id company_id employee_id created_by destination address purpose comment revision created_at",
-            "request_id object_id planned_start planned_end daily_rate proposed_at trip_id confirmed_at confirmed_by"),
+            "request_id object_id planned_start planned_end daily_rate proposed_at trip_id confirmed_at confirmed_by "
+                + "proposal_estimate declined_at"),
+        new Table("work_trip_offer_history", "offer_id revision kind actor_id happened_at reason",
+            "planned_start planned_end proposed_at proposal_estimate"),
+        new Table("work_trip_route_stops", "id offer_id position destination skip_reason", "planned_at visited_at skipped_at"),
+        new Table("work_trip_actual_expenses", "trip_id transport lodging meals other note revision updated_at", ""),
         new Table("work_trip_tasks", "trip_id task_id", ""),
         new Table("work_trip_requests", "id company_id employee_id destination purpose planned_start planned_end status reason created_at",
             "trip_id decided_at decided_by estimate"),

@@ -62,8 +62,10 @@ final class Main {
     private static final Pattern TRIP_ACTION = Pattern.compile("/trips/([0-9]{1,19})/(start|finish|report)");
     private static final Pattern TRIP_TASKS = Pattern.compile("/trips/([0-9]{1,19})/tasks");
     private static final Pattern TRIP_BUDGET = Pattern.compile("/trips/([0-9]{1,19})/(budget|estimate)");
+    private static final Pattern TRIP_ACTUAL_EXPENSES = Pattern.compile("/trips/([0-9]{1,19})/actual-expenses");
+    private static final Pattern TRIP_STOP = Pattern.compile("/trips/([0-9]{1,19})/stops/([0-9]{1,19})");
     private static final Pattern TRIP_REQUEST_DECISION = Pattern.compile("/trip-requests/([0-9]{1,19})/decision");
-    private static final Pattern TRIP_OFFER_ACTION = Pattern.compile("/trip-offers/([0-9]{1,19})/(proposal|confirm)");
+    private static final Pattern TRIP_OFFER_ACTION = Pattern.compile("/trip-offers/([0-9]{1,19})/(proposal|confirm|revise|decline)");
 
     private record Attempts(long start, int count) {}
     private record Result(int status, Map<String, Object> body, byte[] image) {
@@ -167,7 +169,8 @@ final class Main {
                 Result result;
                 try {
                     boolean post = "POST".equals(method);
-                    boolean importing = post && ("/planning/import".equals(path) || "/planning/import/preview".equals(path));
+                    boolean importing = post && ("/planning/import".equals(path) || "/planning/import/preview".equals(path)
+                        || "/trip-offers/import".equals(path));
                     boolean photoRequest = post && ("/sync/events".equals(path) || PHOTOS.matcher(path).matches()
                         || "/representative/decision".equals(path));
                     Semaphore slots = importing ? IMPORT_SLOTS : photoRequest ? PHOTO_REQUEST_SLOTS : null;
@@ -266,7 +269,7 @@ final class Main {
                  "POST /shifts/calendar", "POST /incidents", "POST /planning/templates",
                  "POST /planning/assignment-settings", "POST /field-work/defaults", "POST /trips",
                  "POST /field-control/work-mode", "POST /trip-offers" -> payload(exchange);
-            case "POST /planning/import", "POST /planning/import/preview" -> payload(exchange, MAX_IMPORT_BODY);
+            case "POST /planning/import", "POST /planning/import/preview", "POST /trip-offers/import" -> payload(exchange, MAX_IMPORT_BODY);
             case "POST /sync/events" -> payload(exchange, MAX_PHOTO_BODY);
             default -> {
                 if ("PATCH".equals(method) && TASK.matcher(path).matches()) {
@@ -281,6 +284,7 @@ final class Main {
                             || SHIFT_ACTION.matcher(path).matches() || INCIDENT_ACTION.matcher(path).matches()
                             || TASK_TRANSFER.matcher(path).matches() || EMPLOYEE_PASSWORD.matcher(path).matches()
                             || TRIP_TASKS.matcher(path).matches() || TRIP_BUDGET.matcher(path).matches()
+                            || TRIP_ACTUAL_EXPENSES.matcher(path).matches() || TRIP_STOP.matcher(path).matches()
                             || TRIP_REQUEST_DECISION.matcher(path).matches() || TRIP_OFFER_ACTION.matcher(path).matches()))) {
                     yield payload(exchange);
                 }
@@ -288,6 +292,10 @@ final class Main {
             }
         };
         try (var db = Db.connect(write)) {
+            if (Db.postgres() && "GET".equals(method) && ("/trip-offers".equals(path)
+                    || (path.endsWith("/report") && TRIP_ACTION.matcher(path).matches()))) {
+                db.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+            }
             var user = Accounts.authenticate(db, token);
             var result = authenticated(db, user, token, method, path, payload,
                 "original=1".equals(exchange.getRequestURI().getRawQuery()));
@@ -379,7 +387,9 @@ final class Main {
             case "GET /trip-requests": return ok(TripRequests.list(db, user));
             case "POST /trip-requests": throw Domain.error(403, "Командировку назначает диспетчер.");
             case "GET /trip-offers": return ok(TripOffers.list(db, user));
+            case "GET /trip-offers/import/template": return ok(TripXlsxImport.template(user));
             case "POST /trip-offers": return created(TripOffers.create(db, user, payload));
+            case "POST /trip-offers/import": return ok(TripXlsxImport.process(db, user, payload));
             case "GET /field-control": return ok(FieldControl.dashboard(db, user));
             case "POST /field-control/work-mode": return ok(FieldControl.setWorkMode(db, user, payload));
             case "POST /sync/events": return ok(Sync.apply(db, user, payload));
@@ -424,6 +434,14 @@ final class Main {
         if ("POST".equals(method) && tripBudget.matches()) {
             return ok(Trips.updateBudget(db, user, id(tripBudget.group(1)), "estimate".equals(tripBudget.group(2)), payload));
         }
+        var tripExpenses = TRIP_ACTUAL_EXPENSES.matcher(path);
+        if ("POST".equals(method) && tripExpenses.matches()) {
+            return ok(TripActualExpenses.save(db, user, id(tripExpenses.group(1)), payload));
+        }
+        var tripStop = TRIP_STOP.matcher(path);
+        if ("POST".equals(method) && tripStop.matches()) {
+            return ok(TripRoutes.record(db, user, id(tripStop.group(1)), id(tripStop.group(2)), payload));
+        }
         var tripRequest = TRIP_REQUEST_DECISION.matcher(path);
         if ("POST".equals(method) && tripRequest.matches()) {
             return ok(TripRequests.decide(db, user, id(tripRequest.group(1)), payload));
@@ -431,8 +449,13 @@ final class Main {
         var offer = TRIP_OFFER_ACTION.matcher(path);
         if ("POST".equals(method) && offer.matches()) {
             long offerId = id(offer.group(1));
-            return ok("proposal".equals(offer.group(2)) ? TripOffers.propose(db, user, offerId, payload)
-                : TripOffers.confirm(db, user, offerId, payload));
+            return ok(switch (offer.group(2)) {
+                case "proposal" -> TripOffers.propose(db, user, offerId, payload);
+                case "confirm" -> TripOffers.confirm(db, user, offerId, payload);
+                case "revise" -> TripOffers.revise(db, user, offerId, payload);
+                case "decline" -> TripOffers.decline(db, user, offerId, payload);
+                default -> throw Domain.error(404, "Маршрут не найден.");
+            });
         }
         var representative = REPRESENTATIVE.matcher(path);
         if (representative.matches()) {

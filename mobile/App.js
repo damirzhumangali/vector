@@ -12,7 +12,7 @@ import EmployeeDashboard from './src/EmployeeDashboard';
 import EmailSettings from './src/EmailSettings';
 import { colors as c, Icon } from './src/ui';
 import { EmployeeShiftPanel, EmployeeShiftReminder } from './src/ShiftScreens';
-import { EmployeeTrips } from './src/FieldOperations';
+import EmployeeFieldVisits from './src/EmployeeFieldVisits';
 import { updateShiftReminders } from './src/shiftReminders';
 import { useIncidentNotifications } from './src/incidentNotifications';
 import { WorkScreens } from './src/WorkScreens';
@@ -26,6 +26,22 @@ import QuickAccess, { clearQuickAccess, readQuickAccess } from './src/QuickAcces
 const STORAGE_KEY = 'qwork.tasks.v1';
 const INVITATION_KEY = 'qwork.company-link.v1';
 const QUICK_ACCESS_ONLINE_TIMEOUT_MS = 70000;
+const SAMPLE_STAFF = [
+  ['amina', 'Амина Сейткалиева'],
+  ['nurlan', 'Нурлан Ахметов'],
+  ['daniyar', 'Данияр Омаров'],
+];
+
+function sampleStaffAccounts(session) {
+  if (session?.user.role !== 'dispatcher' || !session.user.isOwner) return [];
+  return SAMPLE_STAFF.map(([key, name]) => ({
+    name, login: `demo.${session.user.id}.${key}`, role: 'employee', department: 'Тестовая команда',
+  }));
+}
+
+function hasSampleEmployee(employees, account) {
+  return employees.some(employee => employee.login === account.login && employee.role === account.role);
+}
 
 async function locateArrival() {
   const permission = await Location.requestForegroundPermissionsAsync();
@@ -300,12 +316,12 @@ function Workspace() {
     if (selectedId === null && page === 'home') return;
     const back = BackHandler.addEventListener('hardwareBackPress', () => {
       if (selectedId !== null) setSelectedId(null);
-      else if (page === 'trips') navigate('shifts');
+      else if (page === 'trips' && tripRoute?.fromShifts) navigate('shifts');
       else navigate('home');
       return true;
     });
     return () => back.remove();
-  }, [selectedId, page]);
+  }, [selectedId, page, tripRoute]);
 
   useEffect(() => {
     if (!session) return;
@@ -419,6 +435,7 @@ function Workspace() {
   function switchRole(nextRole) {
     setSelectedId(null);
     setShowShifts(false);
+    setTripRoute(null);
     setPage('home');
     setRole(nextRole);
   }
@@ -626,6 +643,38 @@ function Workspace() {
     return { ...result.employee, invitationUrl: createEmployeeInvite(result.inviteToken), password: result.temporaryPassword ?? fields.password };
   }
 
+  async function addSampleStaff() {
+    const current = sessionRef.current;
+    const accounts = sampleStaffAccounts(current);
+    if (!accounts.length) return;
+
+    async function readRoster() {
+      const { employees: roster } = await apiRequest('/employees', { token: current.token });
+      if (sessionRef.current === current) {
+        revision.current += 1;
+        setEmployees(previous => {
+          const knownIds = new Set(previous.map(employee => employee.id));
+          return [...previous, ...roster.filter(employee => !knownIds.has(employee.id))];
+        });
+      }
+      return roster;
+    }
+
+    let roster = await readRoster();
+    for (const account of accounts) {
+      if (sessionRef.current !== current) return;
+      if (hasSampleEmployee(roster, account)) continue;
+      try {
+        await addEmployee(account);
+      } catch (failure) {
+        if (sessionRef.current !== current) return;
+        if (failure.status !== 409) throw failure;
+        roster = await readRoster();
+        if (!hasSampleEmployee(roster, account)) throw failure;
+      }
+    }
+  }
+
   async function renewInvite(id) {
     const current = sessionRef.current;
     const employee = employees.find(row => row.id === id);
@@ -692,22 +741,32 @@ function Workspace() {
     }
   }
 
-  function navigate(nextPage) {
+  function navigate(nextPage, tripOptions = null) {
     setPage(nextPage);
+    setTripRoute(nextPage === 'trips' ? tripOptions : null);
     setShowShifts(nextPage === 'shifts');
     setSelectedId(null);
     setNavigationId(value => value + 1);
   }
 
-  function openEmployeeTask(id) {
-    setPage('tasks');
+  function openEmployeeTask(id, options) {
+    if (page === 'trips') {
+      if (!selectedId || options?.tripId) {
+        setTripRoute(previous => ({
+          fromShifts: previous?.fromShifts,
+          view: options?.view ?? previous?.view ?? 'all',
+          tripId: options?.tripId,
+        }));
+      }
+    } else {
+      setPage('tasks');
+    }
     setShowShifts(false);
     setSelectedId(id);
   }
 
   function openEmployeeTrips(options) {
-    setTripRoute(options);
-    navigate('trips');
+    navigate('trips', { ...options, fromShifts: true });
   }
 
   const isEmployeeSession = session?.user.role === 'employee';
@@ -715,6 +774,7 @@ function Workspace() {
   const tasks = isEmployeeSession ? offlineSnapshot?.tasks?.filter(task => task.status !== 'refused') ?? null
     : session ? serverTasks : demoTasks;
   const selected = tasks?.find(task => task.id === selectedId);
+  const missingSampleStaff = sampleStaffAccounts(session).filter(account => !hasSampleEmployee(employees, account));
   const syncIssue = isEmployeeSession ? offlineSnapshot?.issues[0] : null;
   const replaceablePhoto = syncIssue?.replaceable && tasks?.some(task => task.id === syncIssue.taskId);
   const quickAccess = setupSession || (savedQuickAccess && !incomingInvitation);
@@ -802,20 +862,19 @@ function Workspace() {
                 onQuickAccess={() => setSetupSession(session)}
                 onTasks={() => navigate('tasks')} onShifts={() => navigate('shifts')} />
             ) : role === 'employee' && page === 'home' ? (
-              <EmployeeDashboard tasks={tasks ?? []} name={session?.user.name} onSelect={openEmployeeTask} />
+              <EmployeeDashboard key={session?.user.id ?? 'demo'} tasks={tasks ?? []} name={session?.user.name}
+                onSelect={openEmployeeTask} request={isEmployeeSession ? request : undefined} offline={showOfflineIcon}
+                onTripOffer={offerId => navigate('trips', { view: 'trips', offerId })} />
             ) : role === 'employee' && page === 'shifts' && !session ? (
               <View style={styles.empty}><Icon name="calendar" size={36} /><Text style={styles.taskTitle}>Ваш рабочий график</Text><Text style={styles.muted}>Войдите в компанию, чтобы увидеть назначенные смены.</Text>
                 <Pressable onPress={signOut} accessibilityRole="button" style={styles.demoEnter}><Text style={styles.demoEnterText}>Войти в аккаунт</Text></Pressable>
               </View>
-            ) : isEmployeeSession && page === 'trips' ? (
-              <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-                <Pressable accessibilityRole="button" onPress={() => navigate('shifts')} style={styles.exit}>
-                  <Text style={styles.exitText}>‹ К рабочему времени</Text>
-                </Pressable>
-                <EmployeeTrips key={navigationId} request={request} offline={offlineMode || Boolean(networkError)}
-                  tasks={tasks ?? []} onTask={openEmployeeTask} initialView={tripRoute?.view}
-                  initialTripId={tripRoute?.tripId} initialRequestId={tripRoute?.requestId} />
-              </ScrollView>
+            ) : role === 'employee' && page === 'trips' && !selected ? (
+              <EmployeeFieldVisits key={navigationId} request={session ? request : undefined}
+                offline={offlineMode || Boolean(networkError)} tasks={tasks ?? []} onTask={openEmployeeTask}
+                initialView={tripRoute?.view} initialTripId={tripRoute?.tripId}
+                initialRequestId={tripRoute?.requestId} initialOfferId={tripRoute?.offerId}
+                onBackToShifts={tripRoute?.fromShifts ? () => navigate('shifts') : undefined} />
             ) : isEmployeeSession && showShifts ? (
               <EmployeeShiftPanel request={request} offline={offlineMode || Boolean(networkError)} onChange={refreshWork}
                 tasks={tasks ?? []} onUrgentLeave={enqueueUrgentLeave} onShifts={onShifts}
@@ -828,6 +887,7 @@ function Workspace() {
                 <WorkScreens key={selected.id} task={selected}
                   busy={savingTask || Boolean(offlineSnapshot?.urgentLeavePending)} setTask={updateTask}
                   canRefuseTask={isEmployeeSession}
+                  backLabel={page === 'trips' ? 'Выезды' : undefined}
                   onLocate={session ? locateArrival : undefined} onUploadPhoto={session ? uploadPhoto : undefined}
                   request={session ? employeeGallery : request} imageSource={imageSource}
                   galleryRevision={`${selected.revision}|${offlineMode}|${materialsReady}|${offlineSnapshot?.pending}`}
@@ -859,6 +919,9 @@ function Workspace() {
                 onCancelTask={(id, cancelReason) => updateServerTask(id, { status: 'cancelled', cancelReason })}
                 onRepeatTask={(id, fields = {}) => saveServerTask('POST', `/tasks/${encodeURIComponent(id)}/repeat`, fields)}
                 onCreateEmployee={addEmployee}
+                sampleStaff={missingSampleStaff.length ? {
+                  names: missingSampleStaff.map(account => account.name), onAdd: addSampleStaff,
+                } : undefined}
                 onSetDepartment={setEmployeeDepartment}
                 onResetPassword={resetEmployeePassword}
                 onRenewInvite={renewInvite}
@@ -870,11 +933,12 @@ function Workspace() {
               {[
                 ['home', 'Главная', 'home'],
                 ['tasks', 'Задачи', 'clipboard'],
-                role === 'employee' ? ['shifts', 'Рабочее время', 'clock'] : ['analytics', 'Аналитика', 'chart'],
+                ...(role === 'employee'
+                  ? [['shifts', 'Рабочее время', 'clock'], ['trips', 'Выезды', 'briefcase']]
+                  : [['field-operations', 'Выезды', 'briefcase'], ['analytics', 'Аналитика', 'chart']]),
                 ['profile', 'Профиль', 'user'],
               ].map(([key, label, icon]) => {
-                const active = page === key || (key === 'home' && ['team','planning','operations','field-operations'].includes(page))
-                  || (key === 'shifts' && page === 'trips');
+                const active = page === key || (key === 'home' && ['team','planning','operations'].includes(page));
                 return (
                   <Pressable key={key} accessibilityRole="tab" accessibilityLabel={label}
                     accessibilityState={{selected:active}} onPress={() => navigate(key)} style={styles.role}>

@@ -53,26 +53,36 @@ final class TripExpenseAnalytics {
                 expenses.meals, expenses.other, expenses.note, expenses.updated_at
             """ + criteria + " ORDER BY t.planned_start DESC, t.id DESC", arguments.toArray());
 
+        var routeArguments = new ArrayList<>(arguments);
+        routeArguments.addFirst(company);
+        var routes = TripRoutes.forOffers(db,
+            " AND r.id IN (SELECT offer.id " + criteria + " AND offer.employee_id = t.employee_id)",
+            routeArguments.toArray());
+
         var totals = new Summary();
         var trips = new ArrayList<Map<String, Object>>();
         for (var row : rows) {
             if (!filters.includes(Instant.parse((String) row.get("planned_start")))) continue;
             var plan = TripActualExpenses.plannedBudget(row);
             var actual = row.get("actual_id") == null ? null : TripActualExpenses.expenses(row);
+            var stops = row.get("offer_id") instanceof Number offerId
+                ? routes.getOrDefault(offerId.longValue(), List.of()) : List.<Map<String, Object>>of();
             totals.add(plan, actual);
-            trips.add(trip(row, plan, actual));
+            trips.add(trip(row, plan, actual, stops));
         }
         return Map.of("filters", filters.json(), "scope", Map.of("department", department),
             "options", options.json(), "summary", totals.json(), "trips", trips);
     }
 
-    private static Map<String, Object> trip(Map<String, Object> row, TripBudget plan, TripBudget actual) {
+    private static Map<String, Object> trip(Map<String, Object> row, TripBudget plan, TripBudget actual,
+                                            List<Map<String, Object>> stops) {
         var result = new LinkedHashMap<String, Object>();
         result.put("id", row.get("id").toString());
         result.put("employeeId", row.get("employee_id").toString());
         result.put("employeeName", row.get("employee_name"));
         result.put("department", row.get("department"));
         result.put("destination", row.get("destination"));
+        result.put("stops", stops);
         result.put("objectId", Objects.toString(row.get("object_id"), null));
         result.put("address", row.get("address"));
         result.put("plannedStart", row.get("planned_start"));

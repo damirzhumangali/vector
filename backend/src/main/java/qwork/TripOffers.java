@@ -219,7 +219,7 @@ final class TripOffers {
         if (!decision.retry()) {
             String at = Trips.now();
             TripApprovals.record(db, id, decision, revision + 1, at);
-            if (TripApprovals.isFinalApproval(decision)) {
+            if (TripApprovals.isFinalApproval(decision, stages.size())) {
                 schedule(db, user, row, Proposal.from(row), at);
             } else {
                 Db.update(db, "UPDATE work_trip_offers SET revision = revision + 1 WHERE company_id = ? AND id = ?",
@@ -457,7 +457,7 @@ final class TripOffers {
         out.put("stops", route);
         out.put("status", status);
         out.put("selfRequested", selfRequested(row));
-        out.put("approvalStages", stages.stream().map(stage -> stage.json(active)).toList());
+        out.put("approvalStages", stages.stream().map(stage -> stage.json(active, stages.size() == 1)).toList());
         out.put("canDecideApproval", active != null && Accounts.isManager(user) && active.approverId() == number(user, "id"));
         out.putAll(proposalJson(Proposal.from(row)));
         out.put("tripId", Objects.toString(row.get("trip_id"), null));

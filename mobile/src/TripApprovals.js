@@ -6,6 +6,8 @@ import { colors } from './ui';
 
 const labels = { approved: 'Согласовано', rejected: 'Отклонено', waiting: 'На рассмотрении', pending: 'Ожидает своей очереди' };
 const dateFormat = new Intl.DateTimeFormat('ru-RU', { dateStyle: 'medium', timeStyle: 'short' });
+const threeStageTemplate = ['Директор', 'Заместитель директора', 'Главный бухгалтер']
+  .map((title, index) => ({ position: index + 1, title }));
 
 function Card({ children, title }) {
   return <View style={styles.card}>
@@ -127,18 +129,33 @@ export function TripApprovalSettings({ settings, loadError, offline, request, on
   const [saved, setSaved] = useState(false);
   const lock = useRef(false);
   const stages = settings?.stages ?? [];
-  const original = stages.map(stage => stage.approverId == null ? null : String(stage.approverId));
+  const supportsSingle = settings?.supportsSingleApprover === true;
+  const initialCount = supportsSingle && !settings.configured ? 1 : stages.length;
+  const count = draft?.length ?? initialCount;
+  const single = count === 1;
+  const original = count === stages.length
+    ? stages.map(stage => stage.approverId == null ? null : String(stage.approverId))
+    : Array(count).fill(null);
   const selected = draft ?? original;
   const choices = (settings?.candidates ?? []).map(person => ({ id: String(person.id), label: person.name }));
-  const changed = original.some((value, index) => value !== selected[index]);
-  const valid = selected.length === 3 && selected.every(Boolean) && new Set(selected).size === 3;
+  const changed = !settings?.configured || count !== initialCount || original.some((value, index) => value !== selected[index]);
+  const valid = (single || count === 3) && selected.every(Boolean) && new Set(selected).size === count;
   const canSave = settings?.canEdit && changed && valid && !busy && !offline;
+  const canSwitch = supportsSingle && settings.canEdit && (!single || choices.length >= 3 || initialCount === 3);
+  const displayedStages = stages.length === 3 ? stages : threeStageTemplate;
 
   function select(index, id) {
     setDraft(selected.map((value, position) => {
       if (position === index) return id;
       return value === id ? selected[index] : value;
     }));
+    setError('');
+    setSaved(false);
+  }
+
+  function switchCount() {
+    const nextCount = single ? 3 : 1;
+    setDraft(nextCount === initialCount ? null : Array(nextCount).fill(null));
     setError('');
     setSaved(false);
   }
@@ -165,14 +182,21 @@ export function TripApprovalSettings({ settings, loadError, offline, request, on
   return <View style={styles.screen}>
     <TripOfferAction disabled={busy} onPress={onBack}>‹ К выездам</TripOfferAction>
     <Card title="Настройка согласования">
-      <Text style={styles.muted}>Командировки проходят три этапа по порядку. Изменения применяются к новым заявкам.</Text>
       {!settings && !loadError && !offline && <Text style={styles.muted}>Загружаем маршрут согласования…</Text>}
       {offline && <Text style={styles.muted}>Для изменения настроек нужен интернет.</Text>}
       {settings && !settings.canEdit && <Text style={styles.muted}>Назначить ответственных может владелец компании.</Text>}
-      {settings?.canEdit && choices.length < 3 && <Text style={styles.muted}>
+      {settings && <Text style={styles.muted}>{single
+        ? 'Выбранный руководитель будет согласовывать новые командировки.'
+        : 'Командировки проходят три этапа по порядку. Изменения применяются к новым заявкам.'}</Text>}
+      {settings?.canEdit && !single && choices.length < 3 && <Text style={styles.muted}>
         Для настройки нужны три разных руководителя с аккаунтами в компании.
       </Text>}
-      {stages.map((stage, index) => <View key={stage.position} style={styles.stage}>
+      {settings && single && (settings.canEdit ? <OptionPicker label="Выбрать согласующего" icon="user"
+        options={choices} selected={selected[0]} onSelect={id => select(0, id)} disabled={busy || offline}
+        empty="Нет доступных руководителей." /> : <Text style={styles.body}>
+        {settings.configured ? stages[0]?.approverName : 'Согласующий не назначен'}
+      </Text>)}
+      {settings && !single && displayedStages.map((stage, index) => <View key={stage.position} style={styles.stage}>
         <View style={styles.marker}><Text style={styles.number}>{stage.position}</Text></View>
         <View style={styles.stageText}>
           <Text style={styles.label}>{stage.title}</Text>
@@ -185,6 +209,10 @@ export function TripApprovalSettings({ settings, loadError, offline, request, on
       </View>)}
       <ErrorMessage message={error || loadError} />
       {saved && <Text accessibilityLiveRegion="polite" style={styles.approved}>Маршрут сохранён.</Text>}
+      {canSwitch && <TripOfferAction disabled={busy || offline} onPress={switchCount}>
+        {single ? (initialCount === 3 ? 'Вернуться к трём этапам' : 'Настроить три этапа')
+          : (initialCount === 1 ? 'Вернуться к одному согласующему' : 'Перейти на одного согласующего')}
+      </TripOfferAction>}
       {settings?.canEdit && <TripOfferAction primary disabled={!canSave} onPress={save}>
         {busy ? 'Сохраняем…' : 'Сохранить согласование'}
       </TripOfferAction>}

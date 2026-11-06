@@ -39,10 +39,12 @@ final class TripApprovals {
 
     private static final List<String> TITLES = List.of("Директор", "Заместитель директора", "Главный бухгалтер");
     private static final List<String> EXAMPLES = List.of("Айдар Садыков", "Динара Ахметова", "Алия Нурпеисова");
+    private static final String SINGLE_TITLE = "Согласующий";
     private static final String CONFIG = """
-        SELECT s.position, s.approver_id, u.name AS approver_name
-        FROM trip_approval_settings s JOIN users u ON u.id = s.approver_id AND u.company_id = s.company_id
-        WHERE s.company_id = ? AND u.role IN ('manager', 'dispatcher') ORDER BY s.position
+        SELECT s.position, u.id AS approver_id, u.name AS approver_name
+        FROM trip_approval_settings s LEFT JOIN users u ON u.id = s.approver_id AND u.company_id = s.company_id
+            AND u.role IN ('manager', 'dispatcher')
+        WHERE s.company_id = ? ORDER BY s.position
         """;
 
     record Stage(int position, long approverId, String name, String decision, String decidedAt, String reason,
@@ -53,10 +55,10 @@ final class TripApprovals {
                 row.get("decided_revision") == null ? null : number(row, "decided_revision"));
         }
 
-        Map<String, Object> json(Stage active) {
+        Map<String, Object> json(Stage active, boolean singleApprover) {
             var result = new LinkedHashMap<String, Object>();
             result.put("position", position);
-            result.put("title", TITLES.get(position - 1));
+            result.put("title", singleApprover ? SINGLE_TITLE : TITLES.get(position - 1));
             result.put("approverId", Long.toString(approverId));
             result.put("approverName", name);
             result.put("status", decision != null ? decision : this == active ? "waiting" : "pending");
@@ -72,16 +74,18 @@ final class TripApprovals {
 
     static Map<String, Object> settings(Connection db, Map<String, Object> user) throws SQLException {
         long company = number(user, "company_id");
-        var assigned = new LinkedHashMap<Integer, Map<String, Object>>();
-        for (var row : Db.rows(db, CONFIG, company)) assigned.put((int) number(row, "position"), row);
+        var assigned = configuration(db, company);
+        boolean configured = validConfiguration(assigned);
+        boolean singleApprover = configured && assigned.size() == 1;
+        int stageCount = singleApprover ? 1 : TITLES.size();
         var stages = new ArrayList<Map<String, Object>>();
-        for (int i = 0; i < TITLES.size(); i++) {
+        for (int i = 0; i < stageCount; i++) {
             var row = assigned.get(i + 1);
             var stage = new LinkedHashMap<String, Object>();
             stage.put("position", i + 1);
-            stage.put("title", TITLES.get(i));
+            stage.put("title", singleApprover ? SINGLE_TITLE : TITLES.get(i));
             stage.put("exampleName", EXAMPLES.get(i));
-            stage.put("approverId", row == null ? null : row.get("approver_id").toString());
+            stage.put("approverId", row == null || row.get("approver_id") == null ? null : row.get("approver_id").toString());
             stage.put("approverName", row == null ? null : row.get("approver_name"));
             stages.add(stage);
         }
@@ -90,14 +94,14 @@ final class TripApprovals {
             """, company).stream().map(row -> Map.of("id", row.get("id").toString(), "name", row.get("name"))).toList()
             : List.of();
         return Map.of("stages", stages, "candidates", candidates, "canEdit", canEdit(user),
-            "configured", assigned.size() == TITLES.size());
+            "configured", configured, "supportsSingleApprover", true);
     }
 
     static Map<String, Object> saveSettings(Connection db, Map<String, Object> user, Map<String, Object> body)
             throws SQLException {
         if (!canEdit(user)) throw error(403, "Маршрут согласования настраивает создатель компании.");
-        if (!(body.get("approverIds") instanceof List<?> ids) || ids.size() != TITLES.size()) {
-            throw error(400, "Выберите согласующего для каждого из трёх этапов.");
+        if (!(body.get("approverIds") instanceof List<?> ids) || !validStageCount(ids.size())) {
+            throw error(400, "Выберите одного согласующего или трёх разных.");
         }
         long company = number(user, "company_id");
         if (Db.postgres()) Db.one(db, "SELECT id FROM companies WHERE id = ? FOR NO KEY UPDATE", company);
@@ -110,7 +114,7 @@ final class TripApprovals {
             }
             approvers.add(id);
         }
-        if (new HashSet<>(approvers).size() != TITLES.size()) throw error(400, "Выберите трёх разных согласующих.");
+        if (new HashSet<>(approvers).size() != approvers.size()) throw error(400, "Выберите трёх разных согласующих.");
         Db.update(db, "DELETE FROM trip_approval_settings WHERE company_id = ?", company);
         for (int i = 0; i < approvers.size(); i++) {
             Db.update(db, "INSERT INTO trip_approval_settings(company_id, position, approver_id) VALUES (?, ?, ?)",
@@ -120,14 +124,41 @@ final class TripApprovals {
     }
 
     static void begin(Connection db, long company, long offer) throws SQLException {
-        var assigned = Db.rows(db, CONFIG, company);
-        if (assigned.size() != TITLES.size()) {
-            throw error(409, "Попросите создателя компании настроить трёх согласующих командировки.");
+        var assigned = configuration(db, company);
+        if (!validConfiguration(assigned)) {
+            throw error(409, "Попросите создателя компании настроить согласование командировок.");
         }
-        for (var row : assigned) {
+        for (var row : assigned.values()) {
             Db.update(db, "INSERT INTO work_trip_offer_approvals(offer_id, position, approver_id) VALUES (?, ?, ?)",
                 offer, row.get("position"), row.get("approver_id"));
         }
+    }
+
+    private static Map<Integer, Map<String, Object>> configuration(Connection db, long company) throws SQLException {
+        var assigned = new LinkedHashMap<Integer, Map<String, Object>>();
+        for (var row : Db.rows(db, CONFIG, company)) assigned.put((int) number(row, "position"), row);
+        return assigned;
+    }
+
+    private static boolean validConfiguration(Map<Integer, Map<String, Object>> assigned) {
+        if (!validStageCount(assigned.size())) return false;
+        for (int position = 1; position <= assigned.size(); position++) {
+            var row = assigned.get(position);
+            if (row == null || row.get("approver_id") == null) return false;
+        }
+        return true;
+    }
+
+    private static boolean validStageCount(int count) {
+        return count == 1 || count == TITLES.size();
+    }
+
+    private static boolean validStages(List<Stage> stages) {
+        if (!validStageCount(stages.size())) return false;
+        for (int index = 0; index < stages.size(); index++) {
+            if (stages.get(index).position() != index + 1) return false;
+        }
+        return true;
     }
 
     static Map<Long, List<Stage>> forOffers(Connection db, String scope, Object[] parameters) throws SQLException {
@@ -144,6 +175,7 @@ final class TripApprovals {
     }
 
     static Stage active(List<Stage> stages) {
+        if (!validStages(stages)) return null;
         for (var stage : stages) {
             if ("rejected".equals(stage.decision())) return null;
             if (stage.decision() == null) return stage;
@@ -165,7 +197,8 @@ final class TripApprovals {
             default -> throw error(400, "Выберите решение по командировке.");
         };
         String reason = field(body, "reason", "Причина решения", 500, !"rejected".equals(decision));
-        if (stages.size() != TITLES.size()) throw error(409, "Сотрудник ещё не отправил командировку на согласование.");
+        if (!validStages(stages)) throw error(409, "Маршрут согласования недоступен.");
+        if (((Number) value).longValue() > stages.size()) throw error(400, "В маршруте нет такого этапа согласования.");
         var stage = stages.get(((Number) value).intValue() - 1);
         if (stage.approverId() != actor) throw error(403, "Решение принимает назначенный согласующий.");
         if (stage.decidedRevision() != null && expectedRevision == stage.decidedRevision() - 1
@@ -184,8 +217,8 @@ final class TripApprovals {
             """, decision.value(), at, decision.reason(), revision, offer, decision.stage().position());
     }
 
-    static boolean isFinalApproval(Decision decision) {
-        return "approved".equals(decision.value()) && decision.stage().position() == TITLES.size();
+    static boolean isFinalApproval(Decision decision, int stageCount) {
+        return "approved".equals(decision.value()) && decision.stage().position() == stageCount;
     }
 
     private static boolean canEdit(Map<String, Object> user) {

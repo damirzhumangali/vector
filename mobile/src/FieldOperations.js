@@ -418,6 +418,8 @@ function TripForm({ request, objects = [], onCreated, onCancel, offline = false,
   const validPeriod = plannedStart && plannedEnd && end > start;
   const budget = tripBudgetPayload(budgetDraft);
   const approvedRoute = approvalSettings?.configured === true && !approvalSettingsError;
+  const approvalStages = approvalSettings?.configured || !approvalSettings?.supportsSingleApprover
+    ? approvalSettings?.stages ?? [] : [];
   const ready = !blocked && !busy && !placeTooLong && !(placeSource === 'organizations' && addingOrganization)
     && Boolean(place && purpose.trim() && approvedRoute && validPeriod && budget?.dailyRate != null
       && validTripRoute(route, routeStops, plannedStart, plannedEnd));
@@ -533,9 +535,10 @@ function TripForm({ request, objects = [], onCreated, onCancel, offline = false,
           disabled={busy} collapseExpenses />
       </Card>
       <Card title="Маршрут согласования" icon="check">
-        {approvedRoute && <Text style={styles.muted}>Заявка пройдёт эти этапы по очереди.</Text>}
-        {approvalSettings?.stages?.map(stage => <View key={stage.position} style={styles.inset}>
-          <Text style={styles.label}>{stage.position}. {stage.title}</Text>
+        {approvedRoute && <Text style={styles.muted}>{approvalStages.length === 1
+          ? 'Заявку рассмотрит назначенный руководитель.' : 'Заявка пройдёт эти этапы по очереди.'}</Text>}
+        {approvalStages.map(stage => <View key={stage.position} style={styles.inset}>
+          <Text style={styles.label}>{approvalStages.length > 1 ? `${stage.position}. ${stage.title}` : stage.title}</Text>
           <Text style={styles.body}>{stage.approverName || 'Согласующий не назначен'}</Text>
         </View>)}
         <Notice message={approvalSettingsError} />

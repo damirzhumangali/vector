@@ -230,7 +230,7 @@ final class Media {
 
     static Map<String, Object> reject(Connection db, Map<String, Object> user, long taskId, long photoId,
                                       Map<String, Object> payload) throws SQLException {
-        Accounts.requireReviewer(user);
+        Accounts.requireManager(user);
         String reason = field(payload, "reason", "Причина отклонения", 1000, false);
         Db.lockTask(db, number(user, "company_id"), taskId);
         var task = task(db, user, taskId);
@@ -290,9 +290,7 @@ final class Media {
     private static void checkUploadState(Map<String, Object> user, Map<String, Object> task, String kind) {
         String status = (String) task.get("status");
         if (kind.equals("material")) {
-            if (!"dispatcher".equals(user.get("role"))) {
-                throw error(403, "Материалы к заявке может добавить диспетчер.");
-            }
+            Accounts.requireManager(user);
             if (CLOSED.contains(status)) {
                 throw error(409, "Эта заявка уже закрыта.");
             }

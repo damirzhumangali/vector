@@ -328,7 +328,7 @@ function UrgentLeave({ request, onUrgentLeave, offline, incident, pending, busy,
         <Text style={styles.muted}>Срочный уход сохранён на телефоне и ожидает отправки.</Text>
       ) : (
         <>
-          <Text style={styles.muted}>Неначатые заявки вернутся диспетчеру. Уже начатая работа будет приостановлена с сохранением отчёта.</Text>
+          <Text style={styles.muted}>Неначатые заявки вернутся руководителю. Уже начатая работа будет приостановлена с сохранением отчёта.</Text>
           <Choices rows={leaveReasons.map(label => ({ id: label, label }))} selected={reason} onSelect={setReason} />
           <Text style={styles.label}>Объект оставлен безопасно?</Text>
           <Choices rows={[{ id: 'yes', label: 'Да, безопасно' }, { id: 'no', label: 'Нет, нужна помощь' }]}
@@ -417,7 +417,7 @@ function EmployeeEmergency({ incident, request, busy, offline, run }) {
           <Field label="Причина отказа" value={reason} onChange={setReason} limit={500} />
           <Action disabled={busy || offline || !reason.trim()} onPress={() => run(() => post(request, `/incidents/${incident.id}/decision`, {
             action: 'decline', reason: reason.trim(),
-          }), 'Отказ отправлен диспетчеру')}>Подтвердить отказ</Action>
+          }), 'Отказ отправлен руководителю')}>Подтвердить отказ</Action>
           <Action disabled={busy} onPress={() => setReason(null)}>Назад</Action>
         </>
       )}
@@ -607,7 +607,7 @@ function MonthCalendar({ date, onSelect, days, shifts, trips }) {
   );
 }
 
-function ScheduleEditor({ data, request, assignees, busy, run, editable }) {
+function ScheduleEditor({ data, request, assignees, busy, run }) {
   const [date, setDate] = useState(localDate());
   const [mode, setMode] = useState(null);
   const [employee, setEmployee] = useState(null);
@@ -631,13 +631,13 @@ function ScheduleEditor({ data, request, assignees, busy, run, editable }) {
       {day?.label && <Text style={styles.muted}>{day.label}</Text>}
       {shifts.length ? shifts.map(shift => <ShiftSummary key={shift.id} shift={shift} />)
         : <Text style={styles.muted}>На этот день смены и дежурства не назначены.</Text>}
-      {editable && mode === null && (
+      {mode === null && (
         <>
           <Action onPress={() => setMode('shift')}>Назначить смену или дежурство</Action>
           <Action onPress={() => setMode('day')}>Указать рабочий день или выходной</Action>
         </>
       )}
-      {editable && mode === 'shift' && (
+      {mode === 'shift' && (
         <>
           <Text style={styles.label}>Сотрудник</Text>
           <Choices rows={assignees} selected={employee} onSelect={setEmployee} />
@@ -655,7 +655,7 @@ function ScheduleEditor({ data, request, assignees, busy, run, editable }) {
           <Action disabled={busy} onPress={() => setMode(null)}>Отмена</Action>
         </>
       )}
-      {editable && mode === 'day' && (
+      {mode === 'day' && (
         <>
           <Choices rows={[{ id: 'holiday', label: 'Выходной' }, { id: 'working', label: 'Рабочий день' }]}
             selected={dayType} onSelect={setDayType} />
@@ -755,18 +755,18 @@ function ManagerLateness({ incident, request, busy, run }) {
   );
 }
 
-function OfficeIncident({ incident, request, assignees, manager, busy, run }) {
+function OfficeIncident({ incident, request, assignees, busy, run }) {
   return (
     <Card warning={incident.kind === 'urgent_leave' && incident.status === 'open' && incident.safe === false}>
       <IncidentSummary incident={incident} />
-      {incident.kind === 'lateness' && incident.status === 'open' && manager && (
+      {incident.kind === 'lateness' && incident.status === 'open' && (
         <ManagerLateness incident={incident} request={request} busy={busy} run={run} />
       )}
       {incident.kind === 'urgent_leave' && incident.affectedTasks?.map(task => (
         <View key={task.taskId} style={styles.listItem}>
           <Text style={styles.label}>№{task.taskId} · {task.title}</Text>
           <Text style={styles.muted}>{task.transferred ? 'Передана' : STATUS[task.status] || task.status}</Text>
-          {!manager && !task.transferred && ['paused', 'unassigned'].includes(task.status) && (
+          {!task.transferred && ['paused', 'unassigned'].includes(task.status) && (
             <TransferForm assignees={assignees.filter(row => String(row.id) !== String(incident.employeeId))}
               busy={busy} onTransfer={assigneeId => run(() => post(request, `/incidents/${incident.id}/transfer`,
                 { taskId: task.taskId, assigneeId }), 'Заявка передана')} />
@@ -777,11 +777,10 @@ function OfficeIncident({ incident, request, assignees, manager, busy, run }) {
   );
 }
 
-export function OfficeShiftPanel({ request, role, employees = [], tasks = [] }) {
+export function OfficeShiftPanel({ request, employees = [], tasks = [] }) {
   const [screen, setScreen] = useState('incidents');
   const { data, reload, error } = useShiftData(request, false);
   const { busy, notice, run } = useAction(reload);
-  const manager = role === 'manager';
   const assignees = employees.filter(user => user.role === 'employee').map(user => ({ id: user.id, label: user.name }));
   const available = assignees.filter(row => !data.unavailableEmployeeIds.includes(String(row.id)));
   const attention = data.incidents.filter(incident => incident.status === 'open').length;
@@ -806,20 +805,18 @@ export function OfficeShiftPanel({ request, role, employees = [], tasks = [] }) 
             <ShiftSummary shift={shift} />
             <Text style={styles.muted}>Заявка №{taskId}{tasks.find(task => task.id === taskId)?.title
               ? ' · ' + tasks.find(task => task.id === taskId).title : ''}</Text>
-            {!manager && (
-              <TransferForm assignees={available.filter(row => String(row.id) !== String(shift.employeeId))} busy={busy}
-                onTransfer={assigneeId => run(() => post(request, `/shifts/${shift.id}/transfer`, { taskId, assigneeId }), 'Заявка передана')} />
-            )}
+            <TransferForm assignees={available.filter(row => String(row.id) !== String(shift.employeeId))} busy={busy}
+              onTransfer={assigneeId => run(() => post(request, `/shifts/${shift.id}/transfer`, { taskId, assigneeId }), 'Заявка передана')} />
           </Card>
         )))}
       {screen === 'schedule' ? (
-        <ScheduleEditor data={data} request={request} assignees={assignees} busy={busy} run={run} editable={!manager} />
+        <ScheduleEditor data={data} request={request} assignees={assignees} busy={busy} run={run} />
       ) : (
         <>
-          {!manager && <EmergencyForm request={request} tasks={tasks} assignees={available} busy={busy} run={run} />}
+          <EmergencyForm request={request} tasks={tasks} assignees={available} busy={busy} run={run} />
           {data.incidents.length === 0 && <Card><Text style={styles.muted}>Ситуаций пока нет.</Text></Card>}
           {data.incidents.map(incident => <OfficeIncident key={incident.id} incident={incident}
-            request={request} assignees={available} manager={manager} busy={busy} run={run} />)}
+            request={request} assignees={available} busy={busy} run={run} />)}
         </>
       )}
     </View>

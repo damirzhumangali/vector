@@ -55,7 +55,7 @@ final class FieldWork {
     }
 
     static Map<String, Object> defaults(Connection db, Map<String, Object> user) throws SQLException {
-        Accounts.requireDispatcher(user);
+        Accounts.requireManager(user);
         long company = number(user, "company_id");
         var rules = Db.rows(db, """
             SELECT d.scope, d.scope_key, d.manager_id, u.name
@@ -66,14 +66,14 @@ final class FieldWork {
                 "managerId", row.get("manager_id").toString(), "managerName", row.get("name")
             )).toList();
         var managers = Db.rows(db, """
-            SELECT id, name FROM users WHERE company_id = ? AND role = 'manager' ORDER BY name, id
+            SELECT id, name FROM users WHERE company_id = ? AND role IN ('manager', 'dispatcher') ORDER BY name, id
             """, company).stream().map(row -> Map.of("id", row.get("id").toString(), "name", row.get("name"))).toList();
         return Map.of("defaults", rules, "managers", managers);
     }
 
     static Map<String, Object> saveDefault(Connection db, Map<String, Object> user, Map<String, Object> payload)
             throws SQLException {
-        Accounts.requireDispatcher(user);
+        Accounts.requireManager(user);
         long company = number(user, "company_id");
         boolean object = payload.get("objectId") != null;
         boolean department = payload.get("department") != null;
@@ -127,7 +127,7 @@ final class FieldWork {
     static Long manager(Connection db, long company, Object value) throws SQLException {
         if (value == null) return null;
         long id = positiveId(value, "Выберите руководителя вашей компании.");
-        if (Db.one(db, "SELECT id FROM users WHERE company_id = ? AND id = ? AND role = 'manager'", company, id) == null) {
+        if (Db.one(db, "SELECT id FROM users WHERE company_id = ? AND id = ? AND role IN ('manager', 'dispatcher')", company, id) == null) {
             throw error(400, "Выберите руководителя вашей компании.");
         }
         return id;

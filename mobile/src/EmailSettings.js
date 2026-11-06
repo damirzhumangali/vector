@@ -122,7 +122,9 @@ export default function EmailSettings({ user, request }) {
         {account.email ? 'Изменить почту' : 'Добавить почту'}
       </Button>
     </>}
-    {mailAvailable === false && <Text style={styles.caption}>Отправка писем пока недоступна. Пользуйтесь логином, а за новым паролем обратитесь к диспетчеру.</Text>}
+    {mailAvailable === false && <Text style={styles.caption}>{account.isOwner
+      ? 'Отправка писем пока недоступна. Для входа используйте почту или логин и текущий пароль.'
+      : 'Отправка писем пока недоступна. Пользуйтесь логином, а за новым паролем обратитесь к создателю компании.'}</Text>}
     {notice ? <Text accessibilityLiveRegion="polite" style={styles.notice}>{notice}</Text> : null}
     {error ? <Text accessibilityRole="alert" style={styles.error}>{error}</Text> : null}
   </View>;

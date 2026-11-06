@@ -33,9 +33,7 @@ final class Analytics {
 
     static Map<String, Object> report(Connection db, Map<String, Object> user, Map<String, String> input)
             throws SQLException {
-        if (!Set.of("dispatcher", "manager").contains(user.get("role"))) {
-            throw error(403, "Аналитика доступна диспетчеру и руководителю.");
-        }
+        Accounts.requireManager(user);
         long company = number(user, "company_id");
         String department = authorizedDepartment(user);
         var filters = Filters.read(input, department);

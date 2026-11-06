@@ -29,7 +29,7 @@ final class Places {
     private Places() {}
 
     static Map<String, Object> list(Connection db, Map<String, Object> user) throws SQLException {
-        Accounts.requireDispatcher(user);
+        Accounts.requireManager(user);
         var rows = Db.rows(db, """
             SELECT id, name, address, latitude, longitude, radius
             FROM work_sites WHERE company_id = ? ORDER BY name, id
@@ -39,7 +39,7 @@ final class Places {
 
     static Map<String, Object> create(Connection db, Map<String, Object> user, Map<String, Object> payload)
             throws SQLException {
-        Accounts.requireDispatcher(user);
+        Accounts.requireManager(user);
         String name = field(payload, "name", "Название объекта", 160, false);
         String address = field(payload, "address", "Адрес", 240, true);
         var location = validatedLocation(payload.get("location"));
@@ -50,6 +50,14 @@ final class Places {
             location.get("longitude"), location.get("radius"));
         return Map.of("object", Map.of("id", Long.toString(id), "name", name, "address", address,
             "location", location));
+    }
+
+    static Map<String, Object> tripDestinations(Connection db, Map<String, Object> user) throws SQLException {
+        var rows = Db.rows(db, """
+            SELECT id, name, address FROM work_sites WHERE company_id = ? ORDER BY name, id
+            """, number(user, "company_id"));
+        return Map.of("objects", rows.stream().map(row -> Map.of("id", row.get("id").toString(),
+            "name", row.get("name"), "address", row.get("address"))).toList());
     }
 
     static Selection resolve(Connection db, Map<String, Object> user, Map<String, Object> payload)

@@ -34,7 +34,7 @@ final class FieldControl {
 
     static Map<String, Object> setWorkMode(Connection db, Map<String, Object> user, Map<String, Object> body)
             throws SQLException {
-        Trips.requireOffice(user);
+        Accounts.requireManager(user);
         long employeeId = Trips.identifier(body.get("employeeId"), "Сотрудник");
         String mode = field(body, "workMode", "График работы", 10, false);
         if (!Set.of("stationary", "field").contains(mode)) throw error(400, "Выберите стационарный или выездной график.");
@@ -47,7 +47,7 @@ final class FieldControl {
     }
 
     static Map<String, Object> dashboard(Connection db, Map<String, Object> user) throws SQLException {
-        Trips.requireOffice(user);
+        Accounts.requireManager(user);
         long company = number(user, "company_id");
         Instant now = Instant.now();
         var employees = Db.rows(db, """

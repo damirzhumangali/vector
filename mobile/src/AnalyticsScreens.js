@@ -12,7 +12,7 @@ const STATUS_LABELS = {
   done: 'Работа принята', rework: 'На доработке', paused: 'Приостановлена',
   cancelled: 'Отменена', repeated: 'Назначен повторный выезд',
 };
-const PHOTO_LABELS = { before: 'До', after: 'После', material: 'Материал диспетчера' };
+const PHOTO_LABELS = { before: 'До', after: 'После', material: 'Материал руководителя' };
 
 function queryPath(filters) {
   const query = Object.entries(filters)

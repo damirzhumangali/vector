@@ -18,6 +18,7 @@ import static qwork.Domain.field;
 import static qwork.Domain.number;
 
 final class TripXlsxImport {
+    private static final String LOGIN_EXAMPLE = "Например, a.sadykova";
     private static final Map<String, String> HEADERS = Map.of(
         "логин сотрудника", "login", "логин", "login", "город", "city",
         "организации", "organizations", "организация", "organizations",
@@ -26,10 +27,12 @@ final class TripXlsxImport {
     private static final Pattern SEPARATOR = Pattern.compile(";|\\R");
     private static final Pattern SPACES = Pattern.compile("\\s+", Pattern.UNICODE_CHARACTER_CLASS);
 
+    private record Place(List<String> destinations, boolean scheduleVisits) {}
+
     private TripXlsxImport() {}
 
     static Map<String, Object> template(Map<String, Object> user) throws IOException {
-        Accounts.requireDispatcher(user);
+        requireApplicant(user);
         try (var input = TripXlsxImport.class.getResourceAsStream("/trip-import.xlsx")) {
             if (input == null) throw new IOException("Missing trip-import.xlsx");
             return Map.of("base64", Base64.getEncoder().encodeToString(input.readAllBytes()),
@@ -40,11 +43,12 @@ final class TripXlsxImport {
 
     static Map<String, Object> process(Connection db, Map<String, Object> user, Map<String, Object> payload)
             throws SQLException, IOException {
-        Accounts.requireDispatcher(user);
+        requireApplicant(user);
         var sheet = XlsxImport.readPayload(payload);
         var columns = columns(sheet.rows().getFirst());
         long company = number(user, "company_id");
-        // Serialize imports per company, including when different dispatchers upload the same file.
+        long employee = number(user, "id");
+        // Keep the duplicate check and draft creation in one serialized company transaction.
         Planning.lockCompany(db, company);
         var rows = new ArrayList<Map<String, Object>>();
         int created = 0;
@@ -52,32 +56,44 @@ final class TripXlsxImport {
         int errors = 0;
         for (var row : sheet.rows().subList(1, sheet.rows().size())) {
             try {
+                var loginCell = row.cells().get("A");
+                if (row.number() == 2 && "login".equals(columns.get("A")) && loginCell != null && !loginCell.formula()
+                        && LOGIN_EXAMPLE.equals(loginCell.text())) {
+                    // The XLSX reader omits blank cells and retains formulas.
+                    if (columns.keySet().stream().noneMatch(column -> !"A".equals(column) && row.cells().containsKey(column))) {
+                        continue;
+                    }
+                    throw error(400, "Замените пример логином сотрудника из qwork.");
+                }
                 var fields = rowFields(row, columns);
-                long employee = employee(db, company, fields);
+                String login = field(fields, "login", "Логин сотрудника", 40, false).toLowerCase(Locale.ROOT);
+                if (!login.equals(user.get("login"))) {
+                    throw error(400, "Укажите свой логин qwork. Импорт создаёт только ваши черновики.");
+                }
                 String purpose = field(fields, "purpose", "Задание", 1000, false);
                 String comment = field(fields, "comment", "Комментарий", 1000, true);
-                var destinations = destinations(fields);
+                var place = place(fields);
                 var assignment = new LinkedHashMap<String, Object>();
-                assignment.put("employeeId", employee);
                 assignment.put("purpose", purpose);
                 assignment.put("comment", comment);
-                if (destinations.size() == 1) {
-                    assignment.put("destination", destinations.getFirst());
-                } else {
-                    assignment.put("destinations", destinations);
+                if (place.scheduleVisits()) {
+                    assignment.put("destinations", place.destinations());
                     TripRoutes.destinations(assignment);
+                } else {
+                    assignment.put("destination", place.destinations().getFirst());
                 }
-                String requestId = requestId(employee, destinations, purpose, comment);
+                String requestId = requestId(employee, place.destinations(), purpose, comment);
                 var existing = Db.one(db, """
-                    SELECT id FROM work_trip_offers WHERE company_id = ? AND request_id = ? ORDER BY id LIMIT 1
-                    """, company, requestId);
+                    SELECT id FROM work_trip_offers
+                    WHERE company_id = ? AND created_by = ? AND request_id = ? AND self_requested = 1
+                    """, company, employee, requestId);
                 if (existing != null) {
                     duplicates++;
                     rows.add(Map.of("row", row.number(), "status", "duplicate", "offerId", existing.get("id").toString()));
                     continue;
                 }
                 assignment.put("requestId", requestId);
-                long id = TripOffers.createId(db, user, assignment);
+                long id = TripOffers.createDraft(db, user, assignment);
                 created++;
                 rows.add(Map.of("row", row.number(), "status", "created", "offerId", Long.toString(id)));
             } catch (Domain.Failure failure) {
@@ -117,14 +133,11 @@ final class TripXlsxImport {
         return fields;
     }
 
-    private static long employee(Connection db, long company, Map<String, Object> fields) throws SQLException {
-        String login = field(fields, "login", "Логин сотрудника", 40, false).toLowerCase(Locale.ROOT);
-        var row = Db.one(db, "SELECT id FROM users WHERE company_id = ? AND role = 'employee' AND login = ?", company, login);
-        if (row == null) throw error(400, "Сотрудник с таким логином не найден в компании.");
-        return number(row, "id");
+    private static void requireApplicant(Map<String, Object> user) {
+        if (!Trips.isEmployee(user)) throw error(403, "Сотрудник импортирует свои черновики командировок.");
     }
 
-    private static List<String> destinations(Map<String, Object> fields) {
+    private static Place place(Map<String, Object> fields) {
         String city = tidy(field(fields, "city", "Город", 300, true));
         String organizations = field(fields, "organizations", "Организации", 10_000, true);
         var names = new ArrayList<String>();
@@ -134,9 +147,9 @@ final class TripXlsxImport {
             String location = city.isEmpty() ? name : city + " · " + name;
             names.add(field(Map.of("location", location), "location", "Место назначения", 300, false));
         }
-        if (!names.isEmpty()) return names;
+        if (!names.isEmpty()) return new Place(names, true);
         if (city.isEmpty()) throw error(400, "Укажите город или организацию.");
-        return List.of(city);
+        return new Place(List.of(city), false);
     }
 
     private static String requestId(long employee, List<String> destinations, String purpose, String comment) throws IOException {

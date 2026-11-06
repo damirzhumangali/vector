@@ -16,6 +16,16 @@ function dateLabel(value) {
   return Number.isFinite(time) ? dateFormat.format(time) : null;
 }
 
+export function tripRouteTitle(stops = []) {
+  const count = stops.length;
+  if (count < 2) return null;
+  const last = count % 10;
+  const teens = count % 100 >= 11 && count % 100 <= 14;
+  const noun = !teens && last === 1 ? 'организация'
+    : !teens && last >= 2 && last <= 4 ? 'организации' : 'организаций';
+  return `Маршрут · ${count} ${noun}`;
+}
+
 function routeError(value, stops, start, end) {
   if (!stops.length) return value.length ? 'Уберите точки, которых нет в задании.' : '';
   const ids = new Set(stops.map(stop => String(stop.id)));
@@ -28,8 +38,10 @@ function routeError(value, stops, start, end) {
     return 'Сначала укажите начало и окончание командировки.';
   }
   const times = value.map(stop => timestamp(stop.plannedAt));
-  if (times.some(time => !Number.isFinite(time))) return 'Выберите дату и время каждой точки.';
-  if (times.some(time => time < beginning || time > finish)) return 'Время каждой точки должно быть в периоде поездки.';
+  if (times.some(time => !Number.isFinite(time))) return stops.length === 1
+    ? 'Выберите дату и время посещения объекта.' : 'Выберите дату и время каждой точки.';
+  if (times.some(time => time < beginning || time > finish)) return stops.length === 1
+    ? 'Время посещения объекта должно быть в периоде поездки.' : 'Время каждой точки должно быть в периоде поездки.';
   if (times.some((time, index) => index > 0 && time <= times[index - 1])) {
     return 'Время точек должно идти по возрастанию. Измените порядок или время.';
   }
@@ -48,9 +60,9 @@ function RouteButton({ children, label, onPress, primary, disabled }) {
   </Pressable>;
 }
 
-function StopHeading({ index, destination }) {
+function StopHeading({ index, destination, multiple }) {
   return <View style={styles.heading}>
-    <Text style={styles.index}>{index + 1}</Text>
+    {multiple && <Text style={styles.index}>{index + 1}</Text>}
     <Text accessibilityRole="header" style={styles.stopName}>{destination}</Text>
   </View>;
 }
@@ -58,6 +70,7 @@ function StopHeading({ index, destination }) {
 export function TripRouteEditor({ stops = [], value = [], onChange, start, end, disabled = false }) {
   const [openId, setOpenId] = useState(null);
   if (!stops.length) return null;
+  const multiple = stops.length > 1;
   const assigned = new Map(stops.map(stop => [String(stop.id), stop]));
   const route = value.length ? value : stops.map(({ id, plannedAt }) => ({ id, plannedAt: plannedAt ?? null }));
   const warning = routeError(route, stops, start, end);
@@ -65,6 +78,8 @@ export function TripRouteEditor({ stops = [], value = [], onChange, start, end, 
   const endAt = timestamp(end);
   const validPeriod = Number.isFinite(startAt) && endAt > startAt;
   const canPickTime = !disabled && validPeriod;
+  const firstDate = validPeriod ? new Date(startAt) : undefined;
+  const lastDate = validPeriod ? new Date(endAt) : undefined;
 
   function move(index, delta) {
     if (disabled || index + delta < 0 || index + delta >= route.length) return;
@@ -74,36 +89,38 @@ export function TripRouteEditor({ stops = [], value = [], onChange, start, end, 
   }
 
   function setTime(id, date) {
-    if (!disabled) {
+    if (canPickTime) {
       onChange(route.map(item => item.id === id ? { ...item, plannedAt: deadlineToIso(date) } : item));
     }
   }
 
   return <View style={styles.card}>
-    <Text accessibilityRole="header" style={styles.title}>Маршрут поездки</Text>
-    <Text style={styles.muted}>Расставьте точки в порядке посещения и назначьте время каждой.</Text>
+    <Text accessibilityRole="header" style={styles.title}>{multiple ? 'Время посещения объектов' : 'Время посещения объекта'}</Text>
+    <Text style={styles.muted}>{multiple
+      ? 'Выберите дату и время для каждого объекта в пределах периода поездки. Порядок можно менять.'
+      : 'Выберите дату и время визита на объект в пределах периода поездки.'}</Text>
     {route.map(({ id, plannedAt }, index) => {
       const destination = assigned.get(String(id))?.destination;
       const planned = dateLabel(plannedAt);
-      const open = openId === id;
+      const open = !multiple || openId === id;
       return <View key={id} style={styles.stop}>
-        <StopHeading index={index} destination={destination} />
-        <View style={styles.actions}>
+        <StopHeading index={index} destination={destination} multiple={multiple} />
+        {multiple && <View style={styles.actions}>
           <RouteButton label={'Переместить выше · ' + destination} disabled={disabled || index === 0}
             onPress={() => move(index, -1)}>Выше</RouteButton>
           <RouteButton label={'Переместить ниже · ' + destination} disabled={disabled || index === route.length - 1}
             onPress={() => move(index, 1)}>Ниже</RouteButton>
-        </View>
-        <Pressable accessibilityRole="button" accessibilityLabel={'Дата и время · ' + destination}
+        </View>}
+        {multiple && <Pressable accessibilityRole="button" accessibilityLabel={'Дата и время · ' + destination}
           accessibilityState={{ expanded: open, disabled: !canPickTime }} disabled={!canPickTime}
           onPress={() => setOpenId(open ? null : id)} style={styles.schedule}>
           <Icon name="calendar" size={18} />
-          <Text style={styles.scheduleText}>{planned || 'Выбрать дату и время'}</Text>
+          <Text style={styles.scheduleText}>{planned ? 'Посещение · ' + planned : 'Выбрать дату и время посещения'}</Text>
           <Icon name={open ? 'close' : 'chevron-right'} size={17} />
-        </Pressable>
-        {open && validPeriod && <DeadlinePicker label="Плановое посещение" value={planned ? new Date(plannedAt) : null}
-          suggestedDate={new Date(startAt)} minimumDate={new Date(startAt)} maximumDate={new Date(endAt)}
-          onChange={date => setTime(id, date)} required showQuick={false} showHelper={false} disabled={disabled} />}
+        </Pressable>}
+        {open && <DeadlinePicker label="Плановое посещение" value={planned ? new Date(plannedAt) : null}
+          suggestedDate={firstDate} minimumDate={firstDate} maximumDate={lastDate}
+          onChange={date => setTime(id, date)} required showQuick={false} showHelper={false} disabled={!canPickTime} />}
       </View>;
     })}
     {warning ? <Text accessibilityLiveRegion="polite" style={styles.warning}>{warning}</Text> : null}
@@ -116,6 +133,7 @@ export function TripRouteSummary({ stops = [], active = false, onMark, busy = fa
   const [sending, setSending] = useState(false);
   const inFlight = useRef(false);
   if (!stops.length) return null;
+  const multiple = stops.length > 1;
   const canMark = active && typeof onMark === 'function';
   const disabled = busy || offline || sending;
   const visited = stops.filter(stop => stop.visitedAt).length;
@@ -143,9 +161,9 @@ export function TripRouteSummary({ stops = [], active = false, onMark, busy = fa
   }
 
   return <View style={styles.card}>
-    <Text accessibilityRole="header" style={styles.title}>Маршрут поездки</Text>
-    <Text style={styles.muted}>Посещено {visited} из {stops.length}
-      {skipped > 0 ? ' · Пропущено ' + skipped : ''}</Text>
+    <Text accessibilityRole="header" style={styles.title}>{multiple ? 'Маршрут поездки' : 'Посещение объекта'}</Text>
+    {multiple && <Text style={styles.muted}>Посещено {visited} из {stops.length}
+      {skipped > 0 ? ' · Пропущено ' + skipped : ''}</Text>}
     {canMark && offline && <Text style={styles.muted}>Для отметки точек нужна связь.</Text>}
     {stops.map((stop, index) => {
       const planned = dateLabel(stop.plannedAt);
@@ -153,10 +171,11 @@ export function TripRouteSummary({ stops = [], active = false, onMark, busy = fa
       const done = stop.visitedAt || stop.skippedAt;
       const enteringReason = canMark && !done && stop.id === skipId;
       return <View key={stop.id} style={styles.stop}>
-        <StopHeading index={index} destination={stop.destination} />
-        <Text style={styles.muted}>{planned ? 'По плану · ' + planned : 'Время ещё не согласовано'}</Text>
+        <StopHeading index={index} destination={stop.destination} multiple={multiple} />
+        <Text style={styles.muted}>{planned ? 'По плану · ' + planned : 'Время посещения ещё не согласовано'}</Text>
         <Text style={[styles.badge, stop.visitedAt && styles.visited, stop.skippedAt && styles.skipped]}>
-          {stop.visitedAt ? 'Посещена' : stop.skippedAt ? 'Пропущена' : 'Ожидает посещения'}
+          {stop.visitedAt ? (multiple ? 'Посещена' : 'Посещение отмечено')
+            : stop.skippedAt ? (multiple ? 'Пропущена' : 'Посещение пропущено') : 'Ожидает посещения'}
         </Text>
         {actual ? <Text style={styles.muted}>Отметка · {actual}</Text> : null}
         {stop.skipReason ? <Text style={styles.body}>Причина · {stop.skipReason}</Text> : null}

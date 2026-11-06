@@ -4,7 +4,7 @@ import {
   TripOfferAction, TripOfferHistory, TripOfferReasonForm, TripOfferTerms, useTripOfferAction,
 } from './TripOfferCard';
 import { colors, Icon } from './ui';
-import { TripRouteSummary } from './TripRoute';
+import { TripRouteSummary, tripRouteTitle } from './TripRoute';
 
 const statusLabels = {
   awaiting_employee: 'Ждём предложения сотрудника',
@@ -72,7 +72,7 @@ export default function DispatcherTripOffer({ offer, request, offline = false, c
       <View style={styles.heading}>
         <Icon name="pin" size={21} />
         <Text accessibilityRole="header" style={styles.title}>
-          {stops.length ? `Маршрут · ${stops.length} организаций` : current.destination}
+          {tripRouteTitle(stops) ?? stops[0]?.destination ?? current.destination}
         </Text>
       </View>
       {current.address && current.address !== current.destination ? <Text style={styles.muted}>{current.address}</Text> : null}
@@ -84,7 +84,7 @@ export default function DispatcherTripOffer({ offer, request, offline = false, c
       <Text style={styles.label}>Что нужно сделать</Text>
       <Text style={styles.body}>{current.purpose}</Text>
       {current.comment ? <>
-        <Text style={styles.label}>Комментарий диспетчера</Text>
+        <Text style={styles.label}>Комментарий руководителя</Text>
         <Text style={styles.body}>{current.comment}</Text>
       </> : null}
       {returned ? <>
@@ -97,7 +97,8 @@ export default function DispatcherTripOffer({ offer, request, offline = false, c
       </> : null}
       {current.status === 'awaiting_employee' && <Text style={styles.hint}>
         {returned ? 'Сотрудник увидит причину и сможет отправить новые условия.'
-          : enhancedAgreement ? 'Сотрудник предложит даты, дневную ставку и расходы.'
+          : stops.length ? 'Сотрудник предложит период поездки, время каждого посещения и дневную ставку.'
+            : enhancedAgreement ? 'Сотрудник предложит даты, дневную ставку и расходы.'
             : 'Сотрудник предложит даты поездки и дневную ставку.'}
       </Text>}
     </View>

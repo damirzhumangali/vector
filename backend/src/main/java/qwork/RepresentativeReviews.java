@@ -72,7 +72,7 @@ final class RepresentativeReviews {
     }
 
     static Map<String, Object> issue(Connection db, Map<String, Object> user, long taskId) throws SQLException {
-        Accounts.requireReviewer(user);
+        Accounts.requireManager(user);
         Db.lockTask(db, number(user, "company_id"), taskId);
         var task = officeTask(db, user, taskId);
         Long reportId = latestReport(db, taskId);
@@ -144,7 +144,7 @@ final class RepresentativeReviews {
     }
 
     private static Map<String, Object> officeTask(Connection db, Map<String, Object> user, long taskId) throws SQLException {
-        Accounts.requireReviewer(user);
+        Accounts.requireManager(user);
         var task = Db.one(db, "SELECT status FROM tasks WHERE company_id = ? AND id = ?", number(user, "company_id"), taskId);
         if (task == null) throw error(404, "Заявка не найдена.");
         return task;

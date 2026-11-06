@@ -53,7 +53,7 @@ final class TripRequests {
     static Map<String, Object> list(Connection db, Map<String, Object> user) throws SQLException {
         long company = number(user, "company_id");
         boolean employee = Trips.isEmployee(user);
-        if (!employee) Trips.requireOffice(user);
+        if (!employee) Accounts.requireManager(user);
         String order = " ORDER BY CASE WHEN r.status = 'pending' THEN 0 ELSE 1 END, r.created_at DESC, r.id DESC";
         String scope = employee ? " AND r.employee_id = ?" : "";
         Object[] parameters = employee ? new Object[] {company, number(user, "id")} : new Object[] {company};
@@ -63,7 +63,7 @@ final class TripRequests {
 
     static Map<String, Object> decide(Connection db, Map<String, Object> user, long id, Map<String, Object> body)
             throws SQLException {
-        Trips.requireOffice(user);
+        Accounts.requireManager(user);
         long company = number(user, "company_id");
         long actor = number(user, "id");
         String decision = field(body, "decision", "Решение", 7, false);

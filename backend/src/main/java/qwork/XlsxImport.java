@@ -87,7 +87,7 @@ final class XlsxImport {
     private XlsxImport() {}
 
     static Map<String, Object> journal(Connection db, Map<String, Object> user) throws SQLException, IOException {
-        Accounts.requireDispatcher(user);
+        Accounts.requireManager(user);
         var runs = Db.rows(db, """
             SELECT id, actor_name, file_name, mode, created_at, total_rows, imported_rows, duplicate_rows,
                 invalid_rows, errors
@@ -106,7 +106,7 @@ final class XlsxImport {
 
     static Map<String, Object> process(Connection db, Map<String, Object> user, Map<String, Object> payload,
                                        boolean apply) throws Exception {
-        Accounts.requireDispatcher(user);
+        Accounts.requireManager(user);
         Object mode = payload.getOrDefault("mode", "planning");
         if (!"planning".equals(mode) && !"tasks".equals(mode)) {
             throw Domain.error(400, "Выберите режим импорта Excel.");

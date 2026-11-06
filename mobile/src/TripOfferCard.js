@@ -2,7 +2,7 @@ import React, { useRef, useState } from 'react';
 import { Keyboard, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import DeadlinePicker, { deadlineToIso } from './DeadlinePicker';
 import { TripBudgetFields, TripBudgetSummary, tripBudgetDraft, tripBudgetPayload, tripBudgetTotals } from './TripBudget';
-import { TripRouteEditor, TripRouteSummary, validTripRoute } from './TripRoute';
+import { TripRouteEditor, TripRouteSummary, tripRouteTitle, validTripRoute } from './TripRoute';
 import { colors, Icon } from './ui';
 
 const statusLabels = {
@@ -13,9 +13,9 @@ const statusLabels = {
 };
 const historyLabels = {
   proposal: 'Сотрудник предложил условия',
-  revision_requested: 'Диспетчер вернул условия на уточнение',
+  revision_requested: 'Руководитель вернул условия на уточнение',
   declined: 'Сотрудник отказался',
-  confirmed: 'Диспетчер подтвердил поездку',
+  confirmed: 'Руководитель подтвердил поездку',
 };
 const dateAndTime = new Intl.DateTimeFormat('ru-RU', { dateStyle: 'medium', timeStyle: 'short' });
 
@@ -81,8 +81,8 @@ export function TripOfferTerms({ offer, title }) {
   const totals = tripBudgetTotals(budget, offer.plannedStart, offer.plannedEnd);
   return <View style={styles.card}>
     <Text accessibilityRole="header" style={styles.title}>{title}</Text>
-    <Text style={styles.description}>Начало · {dateAndTime.format(new Date(offer.plannedStart))}</Text>
-    <Text style={styles.description}>Окончание · {dateAndTime.format(new Date(offer.plannedEnd))}</Text>
+    <Text style={styles.description}>Начало поездки · {dateAndTime.format(new Date(offer.plannedStart))}</Text>
+    <Text style={styles.description}>Окончание поездки · {dateAndTime.format(new Date(offer.plannedEnd))}</Text>
     <TripBudgetSummary value={{ ...budget, ...totals, ...offer.estimate }} />
   </View>;
 }
@@ -114,17 +114,19 @@ function draftFrom(proposal, key, stops) {
   };
 }
 
-export function TripOfferCard({ offer, request, employee, offline = false, onChanged, onTrip, onBack }) {
+export function TripOfferCard({ offer, request, employee, offline = false, onChanged, onTrip, onBack,
+  approvalSettings, approvalSettingsError }) {
   const { current, busy, error, submit, clearError } = useTripOfferAction(offer, request, onChanged);
   const [savedDraft, setSavedDraft] = useState(null);
   const [editing, setEditing] = useState(null);
   const [declining, setDeclining] = useState(null);
   const stops = current.stops ?? [];
+  const selfDraft = current.selfRequested && current.status === 'awaiting_employee';
   const returned = current.status === 'awaiting_employee' && current.revisionReason;
-  const enhancedAgreement = Array.isArray(current.history);
+  const enhancedAgreement = selfDraft || Array.isArray(current.history);
   const canEdit = employee && current.status === 'awaiting_confirmation';
   const canRespond = employee && (current.status === 'awaiting_employee' || canEdit);
-  const canDecline = enhancedAgreement && canRespond;
+  const canDecline = !selfDraft && enhancedAgreement && canRespond;
   const showDecline = canDecline && declining !== null;
   const isEditing = canEdit && editing !== null;
   const showProposal = employee && !showDecline
@@ -139,7 +141,10 @@ export function TripOfferCard({ offer, request, employee, offline = false, onCha
   const budget = tripBudgetPayload(enhancedAgreement ? draft.budget : { dailyRate: draft.budget.dailyRate });
   const routeReady = !stops.length || validTripRoute(draft.route, stops, plannedStart, plannedEnd);
   const canSend = showProposal && plannedStart && plannedEnd && !invalidPeriod
-    && budget?.dailyRate != null && routeReady && !busy && !offline;
+    && budget?.dailyRate != null && routeReady && !busy && !offline && (!selfDraft || approvalSettings?.configured);
+  const approvalHint = selfDraft && !approvalSettings?.configured && !offline
+    ? approvalSettingsError || (approvalSettings ? 'Попросите владельца компании настроить согласование.'
+      : 'Загружаем маршрут согласования…') : '';
 
   function changeDraft(update) {
     setSavedDraft(previous => {
@@ -194,20 +199,20 @@ export function TripOfferCard({ offer, request, employee, offline = false, onCha
         <View style={styles.heading}>
           <View style={styles.placeIcon}><Icon name="pin" /></View>
           <View style={styles.headingText}>
-            <Text style={styles.muted}>Командировка от диспетчера</Text>
+            <Text style={styles.muted}>{selfDraft ? 'Черновик из Excel' : 'Командировка от руководителя'}</Text>
             <Text accessibilityRole="header" style={styles.title}>
-              {stops.length ? `Маршрут · ${stops.length} организаций` : current.destination}
+              {tripRouteTitle(stops) ?? stops[0]?.destination ?? current.destination}
             </Text>
             {current.address && current.address !== current.destination ? <Text style={styles.muted}>{current.address}</Text> : null}
           </View>
         </View>
         <Text accessibilityLiveRegion="polite" style={[styles.badge, current.status === 'confirmed' && styles.confirmedBadge]}>
-          {returned ? 'На уточнении' : statusLabels[current.status]}
+          {selfDraft ? 'Черновик' : returned ? 'На уточнении' : statusLabels[current.status]}
         </Text>
         <Text style={styles.label}>Что нужно сделать</Text>
         <Text style={styles.description}>{current.purpose}</Text>
         {current.comment ? <>
-          <Text style={styles.label}>Комментарий диспетчера</Text>
+          <Text style={styles.label}>{selfDraft ? 'Ваш комментарий' : 'Комментарий руководителя'}</Text>
           <Text style={styles.description}>{current.comment}</Text>
         </> : null}
         {returned ? <>
@@ -223,7 +228,10 @@ export function TripOfferCard({ offer, request, employee, offline = false, onCha
       {showProposal ? (
         <View style={styles.card}>
           <Text accessibilityRole="header" style={styles.title}>Ваши условия поездки</Text>
-          <Text style={styles.muted}>Укажите удобное время и сколько хотите получить за день. Диспетчер подтвердит условия.</Text>
+          <Text style={styles.muted}>{selfDraft ? 'Добавьте даты, время посещений и расходы, затем отправьте черновик на согласование.'
+            : 'Руководитель получит ваш график и дневную ставку на согласование.'}</Text>
+          <Text accessibilityRole="header" style={styles.label}>Период командировки</Text>
+          <Text style={styles.muted}>Когда начинается и заканчивается вся поездка.</Text>
           <DeadlinePicker label="Начало поездки" value={draft.start}
             onChange={start => changeDraft(() => ({ start }))}
             disabled={busy || offline} required showQuick={false} showHelper={false} />
@@ -237,6 +245,7 @@ export function TripOfferCard({ offer, request, employee, offline = false, onCha
           <TripBudgetFields key={draftKey} value={draft.budget} start={plannedStart} end={plannedEnd}
             onChange={update => changeDraft(value => ({ budget: update(value.budget) }))}
             disabled={busy || offline} collapseExpenses expensesAvailable={enhancedAgreement} />
+          {approvalHint ? <Text accessibilityLiveRegion="polite" style={styles.muted}>{approvalHint}</Text> : null}
           <TripOfferAction primary disabled={!canSend} onPress={sendProposal}>
             {busy ? 'Отправляем…' : 'Отправить на согласование'}
           </TripOfferAction>
@@ -248,10 +257,10 @@ export function TripOfferCard({ offer, request, employee, offline = false, onCha
       {!showProposal && stops.length > 0 && <TripRouteSummary stops={stops} />}
 
       {showDecline ? <TripOfferReasonForm title="Отказаться от командировки"
-        hint="Диспетчер увидит причину отказа." actionLabel="Отправить отказ"
+        hint="Руководитель увидит причину отказа." actionLabel="Отправить отказ"
         busy={busy} offline={offline} onCancel={cancelDecline} onSubmit={decline} /> : null}
       {canEdit && !showProposal && !showDecline ? <>
-        <Text style={styles.muted}>Диспетчер получил ваши условия. Здесь появится подтверждение.</Text>
+        <Text style={styles.muted}>Руководитель получил ваши условия. Здесь появится подтверждение.</Text>
         <TripOfferAction primary disabled={offline || busy} onPress={editProposal}>Изменить условия</TripOfferAction>
       </> : null}
       {canDecline && !showDecline ? <TripOfferAction disabled={offline || busy} onPress={openDecline}>

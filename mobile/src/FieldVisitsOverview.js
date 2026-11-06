@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { KURMANGAZY_DESTINATIONS, TRIP_CITIES } from './TripDestinations';
+import { tripRouteTitle } from './TripRoute';
 import { colors, Icon } from './ui';
 
 const filters = [['all', 'Все'], ['assignments', 'На объектах'], ['trips', 'Командировки']];
@@ -27,7 +28,7 @@ function period(start, end) {
 }
 
 function tripPlace(destination, stops = []) {
-  const routeTitle = stops.length ? `Маршрут · ${stops.length} организаций` : null;
+  const routeTitle = tripRouteTitle(stops);
   for (const city of TRIP_CITIES) {
     const prefix = `${city.label} · `;
     if (!destination?.startsWith(prefix)) continue;
@@ -38,6 +39,24 @@ function tripPlace(destination, stops = []) {
 }
 
 function offerEntry(offer, employee, canDispatch, open) {
+  if (offer.selfRequested) {
+    const draft = offer.status === 'awaiting_employee';
+    const rejected = offer.status === 'rejected';
+    const stages = offer.approvalStages ?? [];
+    const pending = stages.find(stage => stage.status === 'waiting');
+    const action = draft && employee ? 'Заполнить черновик'
+      : !employee && offer.status === 'awaiting_approval' && offer.canDecideApproval ? 'Рассмотреть командировку' : '';
+    return {
+      key: `offer-${offer.id}`, kind: 'trips', icon: 'briefcase', ...tripPlace(offer.destination, offer.stops),
+      person: employee ? null : offer.employeeName,
+      description: rejected ? stages.find(stage => stage.status === 'rejected')?.reason ?? offer.purpose : offer.purpose,
+      date: period(offer.plannedStart, offer.plannedEnd), amount: offer.estimate?.total,
+      status: draft ? 'Черновик' : rejected ? 'Отклонена'
+        : pending ? `Согласование · ${pending.position} из ${stages.length}` : 'На согласовании',
+      action, open, bucket: rejected ? 'history' : action ? 'action' : 'waiting',
+      time: time(offer.updatedAt ?? offer.proposedAt ?? offer.createdAt),
+    };
+  }
   const declined = offer.status === 'declined';
   const needsEmployee = offer.status === 'awaiting_employee';
   const needsOffice = offer.status === 'awaiting_confirmation';
@@ -142,9 +161,9 @@ function Section({ title, entries }) {
   </View>;
 }
 
-function Shortcut({ title, subtitle, icon, primary, expanded, onPress }) {
-  return <Pressable accessibilityRole="button" accessibilityState={{ expanded }} onPress={onPress}
-    style={({ pressed }) => [styles.shortcut, primary && styles.primaryNext, pressed && styles.pressed]}>
+function Shortcut({ title, subtitle, icon, primary, expanded, disabled, onPress }) {
+  return <Pressable accessibilityRole="button" accessibilityState={{ expanded, disabled }} disabled={disabled} onPress={onPress}
+    style={({ pressed }) => [styles.shortcut, primary && styles.primaryNext, (pressed || disabled) && styles.pressed]}>
     <Icon name={icon} size={20} color={primary ? '#fff' : '#125DB1'} />
     <View style={styles.shortcutLabel}>
       <Text style={[styles.nextText, primary && styles.primaryNextText]}>{title}</Text>
@@ -156,7 +175,8 @@ function Shortcut({ title, subtitle, icon, primary, expanded, onPress }) {
 
 export default function FieldVisitsOverview({ tasks = [], trips = [], offers = [], requests = [], employee = false,
   canDispatch = false, filter = 'all', onFilter, onTask, onTrip, onOffer, onRequest, onCreateTask, onCreateTrip,
-  onImportTrip, onControl, taskStatuses = {}, loading = false }) {
+  createTripDisabled, tripCreateHint, onImportTrip, importTripDisabled, onSetupApproval, onControl,
+  taskStatuses = {}, loading = false }) {
   const [showHistory, setShowHistory] = useState(false);
   const [choosing, setChoosing] = useState(false);
   const tripById = new Map(trips.map(trip => [String(trip.id), trip]));
@@ -168,7 +188,8 @@ export default function FieldVisitsOverview({ tasks = [], trips = [], offers = [
     return !employee || (task.status !== 'unassigned' && (task.object || task.address || task.objectId || task.location));
   });
   const entries = [
-    ...offers.filter(offer => offer.status !== 'confirmed').map(offer => offerEntry(offer, employee, canDispatch, () => onOffer(offer.id))),
+    ...offers.filter(offer => offer.status !== 'confirmed' && (employee || !offer.selfRequested || offer.status !== 'awaiting_employee'))
+      .map(offer => offerEntry(offer, employee, canDispatch, () => onOffer(offer.id))),
     ...requests.filter(item => item.status !== 'approved').map(item => requestEntry(item, employee, () => onRequest(item.id))),
     ...trips.map(trip => tripEntry(trip, employee, () => onTrip(trip.id), routeByTrip.get(String(trip.id)) ?? [])),
     ...standaloneTasks.map(task => taskEntry(task, employee, taskStatuses[task.status], onTask && (() => onTask(task.id)))),
@@ -179,8 +200,11 @@ export default function FieldVisitsOverview({ tasks = [], trips = [], offers = [
     || (a.time ?? Infinity) - (b.time ?? Infinity));
   const waiting = entries.filter(entry => entry.bucket === 'waiting');
   const history = entries.filter(entry => entry.bucket === 'history').sort((a, b) => (b.time ?? 0) - (a.time ?? 0));
-  const create = filter === 'trips' ? onCreateTrip : filter === 'assignments' ? onCreateTask : null;
-  const importTrip = filter !== 'assignments' ? onImportTrip : null;
+  const showTripActions = filter !== 'assignments';
+  const createTrip = showTripActions ? onCreateTrip : null;
+  const createTask = filter !== 'trips' ? onCreateTask : null;
+  const importTrip = showTripActions ? onImportTrip : null;
+  const setup = showTripActions ? onSetupApproval : null;
 
   return <View style={styles.screen}>
     <View style={styles.filters}>
@@ -190,19 +214,22 @@ export default function FieldVisitsOverview({ tasks = [], trips = [], offers = [
         <Text style={[styles.filterText, filter === key && styles.filterTextActive]}>{label}</Text>
       </Pressable>)}
     </View>
-    {(create || onCreateTask || onCreateTrip || importTrip || onControl) && <View style={styles.shortcuts}>
-      {create ? <Shortcut title={filter === 'trips' ? 'Новая командировка' : 'Новое выездное задание'} icon="plus"
-        primary onPress={create} />
-        : filter === 'all' && (onCreateTask || onCreateTrip) ? <Shortcut title="Создать" icon="plus" primary
-          expanded={choosing} onPress={() => setChoosing(value => !value)} /> : null}
-      {importTrip && <Shortcut title="Импорт Excel" icon="upload" onPress={importTrip} />}
+    {(createTrip || createTask || importTrip || setup || onControl) && <View style={styles.shortcuts}>
+      {createTrip && createTask ? <Shortcut title="Создать" icon="plus" primary
+        expanded={choosing} onPress={() => setChoosing(value => !value)} />
+        : createTrip ? <Shortcut title="Новая командировка" icon="plus" primary
+          disabled={createTripDisabled} onPress={createTrip} />
+          : createTask ? <Shortcut title="Новое выездное задание" icon="plus" primary onPress={createTask} /> : null}
+      {importTrip && <Shortcut title="Импорт Excel" icon="upload" disabled={importTripDisabled} onPress={importTrip} />}
+      {setup && <Shortcut title="Настроить согласование" icon="settings" onPress={setup} />}
       {onControl && <Shortcut title="Контроль" icon="chart" onPress={onControl} />}
     </View>}
+    {createTrip && tripCreateHint ? <Text accessibilityLiveRegion="polite" style={styles.meta}>{tripCreateHint}</Text> : null}
     {choosing && <View style={styles.section}>
       {onCreateTask && <Shortcut title="Выездное задание" subtitle="Работа на объекте в назначенное время" icon="pin"
         onPress={onCreateTask} />}
       {onCreateTrip && <Shortcut title="Командировка" subtitle="Поездка с согласованием дат и оплаты" icon="briefcase"
-        onPress={onCreateTrip} />}
+        disabled={createTripDisabled} onPress={onCreateTrip} />}
     </View>}
     <Section title="Нужно действие" entries={action} />
     <Section title="Сегодня и ближайшие" entries={upcoming} />
@@ -216,7 +243,8 @@ export default function FieldVisitsOverview({ tasks = [], trips = [], offers = [
       <Icon name={loading ? 'clock' : 'briefcase'} size={24} />
       <Text style={styles.title}>{loading ? 'Загружаем выезды…' : filter === 'trips' ? 'Командировок пока нет'
         : filter === 'assignments' ? 'Выездных заданий пока нет' : 'Выездов пока нет'}</Text>
-      {!loading && employee && <Text style={styles.meta}>Здесь появятся выезды, которые назначит диспетчер.</Text>}
+      {!loading && employee && <Text style={styles.meta}>{filter === 'assignments'
+        ? 'Здесь появятся выезды, которые назначит руководитель.' : 'Здесь появятся ваши заявки на командировку и выезды.'}</Text>}
     </View>}
   </View>;
 }

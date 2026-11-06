@@ -48,8 +48,8 @@ final class TripRoutes {
 
     static List<String> destinations(Map<String, Object> body) {
         if (!body.containsKey("destinations")) return List.of();
-        if (!(body.get("destinations") instanceof List<?> values) || values.size() < 2 || values.size() > MAX_STOPS) {
-            throw error(400, "Укажите от 2 до 30 точек маршрута.");
+        if (!(body.get("destinations") instanceof List<?> values) || values.isEmpty() || values.size() > MAX_STOPS) {
+            throw error(400, "Укажите от 1 до 30 точек маршрута.");
         }
         if (body.get("objectId") != null) throw error(400, "Для маршрута укажите названия всех точек.");
         var names = new ArrayList<String>();
@@ -73,6 +73,22 @@ final class TripRoutes {
     static boolean matchesAssignment(Connection db, long offer, List<String> destinations) throws SQLException {
         var assigned = Db.rows(db, "SELECT destination FROM work_trip_route_stops WHERE offer_id = ? ORDER BY position", offer);
         return assigned.stream().map(stop -> (String) stop.get("destination")).toList().equals(destinations);
+    }
+
+    static Plan initialPlan(Connection db, long offer, Object input, String start, String end) throws SQLException {
+        var assigned = Db.rows(db, "SELECT id FROM work_trip_route_stops WHERE offer_id = ? ORDER BY position", offer);
+        if (assigned.isEmpty() && input == null) return new Plan(Map.of(), true);
+        if (!(input instanceof List<?> times) || times.size() != assigned.size()) {
+            throw error(400, "Укажите дату и время для каждой точки маршрута.");
+        }
+        var stops = new ArrayList<Map<String, Object>>();
+        for (int index = 0; index < times.size(); index++) {
+            if (!(times.get(index) instanceof String time)) {
+                throw error(400, "Укажите дату и время для каждой точки маршрута.");
+            }
+            stops.add(Map.of("id", assigned.get(index).get("id"), "plannedAt", time));
+        }
+        return plan(db, offer, stops, start, end);
     }
 
     static Plan plan(Connection db, long offer, Object input, String start, String end) throws SQLException {

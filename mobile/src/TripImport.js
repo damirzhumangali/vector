@@ -7,7 +7,7 @@ import { pickWorkbook } from './PlanningScreens';
 import { colors, Icon } from './ui';
 
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
-const rowStatuses = { created: 'Создана', duplicate: 'Уже есть', error: 'Ошибка' };
+const rowStatuses = { created: 'Черновик', duplicate: 'Уже есть', error: 'Ошибка' };
 
 function Action({ children, icon, onPress, disabled, secondary }) {
   return <Pressable accessibilityRole="button" accessibilityState={{ disabled }} disabled={disabled}
@@ -33,7 +33,10 @@ function ImportResult({ result }) {
       </View>)}
     </View>
     {result.errorCount > 0 && <Text style={styles.muted}>
-      Исправьте отмеченные строки и загрузите файл снова. Уже созданные командировки будут пропущены.
+      Исправьте отмеченные строки и загрузите файл снова. Уже импортированные строки будут пропущены.
+    </Text>}
+    {result.createdCount > 0 && <Text style={styles.muted}>
+      Откройте черновики в списке выездов, заполните даты, время посещений и расходы, затем отправьте на согласование.
     </Text>}
     {result.rows.map(row => <View key={row.row} style={styles.row}>
       <Text style={styles.label}>Строка {row.row}</Text>
@@ -178,7 +181,7 @@ export default function TripImport({ request, offline = false, onImported }) {
       В первой строке укажите «Логин сотрудника», «Город», «Организации», «Задание» и «Комментарий».
     </Text>
     <Text style={styles.muted}>
-      Одна строка соответствует одной командировке. Укажите логин, задание и город или организации.
+      Одна строка создаёт черновик поездки. Укажите свой логин qwork, задание и город или организации.
       Несколько организаций разделите точкой с запятой (;). Комментарий необязателен.
     </Text>
     <Text style={styles.muted}>Формат .xlsx, до 2 МБ и 200 строк. Импорт начнётся сразу после выбора файла.</Text>

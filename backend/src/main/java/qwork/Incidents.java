@@ -164,7 +164,7 @@ final class Incidents {
 
     private static Map<String, Object> emergency(Connection db, Map<String, Object> user,
                                                   Map<String, Object> payload) throws SQLException {
-        Accounts.requireDispatcher(user);
+        Accounts.requireManager(user);
         long company = number(user, "company_id");
         long actor = number(user, "id");
         long assignee = id(payload, "assigneeId", "Исполнитель");
@@ -208,9 +208,7 @@ final class Incidents {
                 reason = "";
                 break;
             case "lateness":
-                if (!"manager".equals(user.get("role"))) {
-                    throw error(403, "Решение об опоздании принимает руководитель.");
-                }
+                Accounts.requireManager(user);
                 if (!Set.of("approve", "reject").contains(action)) throw error(400, "Выберите решение об опоздании.");
                 reason = field(payload, "reason", "Причина решения", 500, !"reject".equals(action));
                 if ("approve".equals(action)) checkLatenessAllowance(db, company, employee, incident);
@@ -257,7 +255,7 @@ final class Incidents {
         Db.lockTask(db, company, taskId);
         var target = task(db, company, taskId);
         if (!"assigned".equals(target.get("status"))) {
-            throw error(409, "Состояние аварийной заявки изменилось. Обратитесь к диспетчеру.");
+            throw error(409, "Состояние аварийной заявки изменилось. Обратитесь к руководителю.");
         }
         var activeEmergency = Db.one(db, """
             SELECT i.id FROM incidents i JOIN tasks t ON t.id = i.task_id
@@ -287,7 +285,7 @@ final class Incidents {
 
     static Map<String, Object> transfer(Connection db, Map<String, Object> user, long incidentId,
                                         Map<String, Object> payload) throws Exception {
-        requireOffice(user);
+        Accounts.requireManager(user);
         var incident = incident(db, user, incidentId);
         if (!"urgent_leave".equals(incident.get("kind"))) throw error(409, "Передача доступна для срочного ухода.");
         long taskId = id(payload, "taskId", "Заявка");
@@ -307,7 +305,7 @@ final class Incidents {
 
     static Map<String, Object> reassign(Connection db, Map<String, Object> user, long taskId, long assigneeId)
             throws Exception {
-        requireOffice(user);
+        Accounts.requireManager(user);
         long company = number(user, "company_id");
         requireAssignee(db, company, assigneeId);
         Shift.requireAvailable(db, company, assigneeId);
@@ -489,9 +487,5 @@ final class Incidents {
 
     private static void requireEmployee(Map<String, Object> user) {
         if (!employee(user)) throw error(403, "Действие доступно сотруднику.");
-    }
-
-    private static void requireOffice(Map<String, Object> user) {
-        if (employee(user)) throw error(403, "Передать заявку может диспетчер или руководитель.");
     }
 }

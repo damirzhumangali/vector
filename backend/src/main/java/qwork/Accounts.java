@@ -54,7 +54,7 @@ final class Accounts {
         long companyId = Db.insert(db, "INSERT INTO companies(code, name) VALUES (?, ?)", code, company);
         long ownerId = Db.insert(db, """
                 INSERT INTO users(company_id, name, login, role, is_owner, password_hash, password_salt, email)
-                VALUES (?, ?, ?, 'dispatcher', 1, ?, ?, ?)
+                VALUES (?, ?, ?, 'manager', 1, ?, ?, ?)
                 """, companyId, owner, login, digest, salt, email);
         bindLogin(db, login, ownerId);
         return issueSession(db, Db.one(db, "SELECT * FROM users WHERE id = ?", ownerId), code, company);
@@ -295,7 +295,7 @@ final class Accounts {
 
     private static void requireEmailDelivery() {
         if (!Mailer.configured()) {
-            throw Domain.error(503, "Отправка писем пока не подключена. Для входа используйте логин, а для сброса пароля обратитесь к диспетчеру.");
+            throw Domain.error(503, "Отправка писем пока не подключена. Для входа используйте логин, а для сброса пароля обратитесь к создателю компании.");
         }
     }
 
@@ -313,21 +313,19 @@ final class Accounts {
         return Domain.error(429, "Письмо уже отправлено. Подождите минуту перед повторной отправкой.");
     }
 
-    static void requireDispatcher(Map<String, Object> user) {
-        if (!"dispatcher".equals(user.get("role"))) {
-            throw Domain.error(403, "Действие доступно диспетчеру.");
-        }
+    static boolean isManager(Map<String, Object> user) {
+        Object role = user.get("role");
+        return "manager".equals(role) || "dispatcher".equals(role);
     }
 
-    static void requireReviewer(Map<String, Object> user) {
-        Object role = user.get("role");
-        if (!"dispatcher".equals(role) && !"manager".equals(role)) {
-            throw Domain.error(403, "Проверка отчёта доступна диспетчеру и руководителю.");
+    static void requireManager(Map<String, Object> user) {
+        if (!isManager(user)) {
+            throw Domain.error(403, "Действие доступно руководителю.");
         }
     }
 
     static Map<String, Object> listEmployees(Connection db, Map<String, Object> user) throws SQLException {
-        requireDispatcher(user);
+        requireManager(user);
         var employees = Db.rows(db, "SELECT * FROM users WHERE company_id = ? ORDER BY name, id",
                 Domain.number(user, "company_id"));
         return Map.of("employees", employees.stream().map(Accounts::userJson).toList());
@@ -336,7 +334,7 @@ final class Accounts {
     static Map<String, Object> createEmployee(Connection db, Map<String, Object> user,
                                                Map<String, Object> payload) throws SQLException {
         if (Domain.number(user, "is_owner") == 0) {
-            throw Domain.error(403, "Добавить сотрудника может диспетчер, создавший компанию.");
+            throw Domain.error(403, "Добавить сотрудника может создатель компании.");
         }
         String name = Domain.field(payload, "name", "Имя", 120, false);
         String login = Domain.field(payload, "login", "Логин", 40, false).toLowerCase(Locale.ROOT);
@@ -345,9 +343,10 @@ final class Accounts {
         if (!STAFF_LOGIN.matcher(login).matches()) {
             throw Domain.error(400, "Придумайте логин из 3–40 символов: латинские буквы, цифры, точка, дефис или подчёркивание.");
         }
-        if (!(payload.get("role") instanceof String role) || !ROLES.contains(role)) {
+        if (!(payload.get("role") instanceof String requestedRole) || !ROLES.contains(requestedRole)) {
             throw Domain.error(400, "Выберите роль сотрудника.");
         }
+        String role = "dispatcher".equals(requestedRole) ? "manager" : requestedRole;
         requireAvailableEmail(db, email, 0);
 
         String temporaryPassword = temporaryPasswordFrom(payload);
@@ -379,7 +378,7 @@ final class Accounts {
     static Map<String, Object> setDepartment(Connection db, Map<String, Object> user, long employeeId,
                                              Map<String, Object> payload) throws SQLException {
         if (Domain.number(user, "is_owner") == 0) {
-            throw Domain.error(403, "Изменить подразделение может диспетчер, создавший компанию.");
+            throw Domain.error(403, "Изменить подразделение может создатель компании.");
         }
         if (!payload.containsKey("department")) {
             throw Domain.error(400, "Укажите подразделение или передайте пустое значение.");
@@ -399,7 +398,7 @@ final class Accounts {
     static Map<String, Object> reissueInvite(Connection db, Map<String, Object> user, long employeeId)
             throws SQLException {
         if (Domain.number(user, "is_owner") == 0) {
-            throw Domain.error(403, "Обновить приглашение может диспетчер, создавший компанию.");
+            throw Domain.error(403, "Обновить приглашение может создатель компании.");
         }
         String invite = randomToken();
         int updated = Db.update(db, """
@@ -415,7 +414,7 @@ final class Accounts {
     static Map<String, Object> resetPassword(Connection db, Map<String, Object> user, long employeeId,
                                                Map<String, Object> payload) throws SQLException {
         if (Domain.number(user, "is_owner") == 0) {
-            throw Domain.error(403, "Сбросить пароль может диспетчер, создавший компанию.");
+            throw Domain.error(403, "Сбросить пароль может создатель компании.");
         }
         long company = Domain.number(user, "company_id");
         var employee = Db.one(db, """
@@ -494,7 +493,7 @@ final class Accounts {
         result.put("login", row.get("login"));
         result.put("email", Objects.toString(row.get("email"), ""));
         result.put("emailVerified", Domain.number(row, "email_verified") != 0);
-        result.put("role", row.get("role"));
+        result.put("role", isManager(row) ? "manager" : row.get("role"));
         result.put("department", row.get("department"));
         result.put("isOwner", Domain.number(row, "is_owner") != 0);
         result.put("lastLoginAt", row.get("last_login_at"));

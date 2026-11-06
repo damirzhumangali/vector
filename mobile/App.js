@@ -33,7 +33,7 @@ const SAMPLE_STAFF = [
 ];
 
 function sampleStaffAccounts(session) {
-  if (session?.user.role !== 'dispatcher' || !session.user.isOwner) return [];
+  if (session?.user.role !== 'manager' || !session.user.isOwner) return [];
   return SAMPLE_STAFF.map(([key, name]) => ({
     name, login: `demo.${session.user.id}.${key}`, role: 'employee', department: 'Тестовая команда',
   }));
@@ -41,6 +41,15 @@ function sampleStaffAccounts(session) {
 
 function hasSampleEmployee(employees, account) {
   return employees.some(employee => employee.login === account.login && employee.role === account.role);
+}
+
+function workspaceUser(user) {
+  return user.role === 'dispatcher' ? { ...user, role: 'manager' } : user;
+}
+
+function workspaceSession(session) {
+  const user = workspaceUser(session.user);
+  return user === session.user ? session : { ...session, user };
 }
 
 async function locateArrival() {
@@ -63,8 +72,7 @@ async function locateArrival() {
 }
 const roles = [
   ['employee', 'Задачи', 'Сотрудник', '▤'],
-  ['dispatcher', 'Диспетчер', 'Диспетчер', '⊞'],
-  ['manager', 'Приёмка', 'Руководитель', '✓'],
+  ['manager', 'Задачи', 'Руководитель', '⊞'],
 ];
 const labels = {
   assigned: 'Назначена',
@@ -329,9 +337,19 @@ function Workspace() {
     let closed = false;
     let prefetching = false;
     const isEmployee = session.user.role === 'employee';
+    const isManager = session.user.role === 'manager';
     const isCurrent = () => !closed && sessionRef.current === session;
     const canSync = () => isCurrent() && !offlineModeRef.current && AppState.currentState !== 'background';
     const scopedRequest = (path, options) => apiRequest(path, { ...options, token: session.token });
+    async function loadManagerResource(path) {
+      try {
+        return await scopedRequest(path);
+      } catch (error) {
+        // Older APIs only allow their dispatcher role to read these resources.
+        if (error.status !== 403) throw error;
+        return null;
+      }
+    }
     const publish = snapshot => { if (isCurrent()) setOfflineSnapshot(snapshot); };
     const storePromise = isEmployee ? openOffline(session).then(store => {
       if (isCurrent()) {
@@ -384,14 +402,12 @@ function Workspace() {
           return;
         }
         const [taskResult, teamResult] = await Promise.all([
-          apiRequest('/tasks', { token: session.token }),
-          session.user.role === 'dispatcher'
-            ? apiRequest('/employees', { token: session.token })
-            : null,
+          scopedRequest('/tasks'),
+          isManager ? loadManagerResource('/employees') : null,
         ]);
         if (closed || sessionRef.current !== session || startedAt !== revision.current) return;
         setServerTasks(taskResult.tasks);
-        if (teamResult) setEmployees(teamResult.employees);
+        if (teamResult) setEmployees(teamResult.employees.map(workspaceUser));
         setNetworkError('');
       } catch (error) {
         if (!closed && sessionRef.current === session) {
@@ -409,14 +425,14 @@ function Workspace() {
 
     refreshRef.current = refresh;
     refresh();
-    if (session.user.role === 'dispatcher') {
-      apiRequest('/objects', { token: session.token })
+    if (isManager) {
+      loadManagerResource('/objects')
         .then(data => {
-          if (!closed && sessionRef.current === session) {
+          if (data && isCurrent()) {
             setObjects(previous => [...data.objects, ...previous.filter(item => !data.objects.some(row => row.id === item.id))]);
           }
         })
-        .catch(error => { if (!closed && sessionRef.current === session) setNetworkError(error.message); });
+        .catch(error => { if (isCurrent()) setNetworkError(error.message); });
     }
     const timer = setInterval(() => {
       if (AppState.currentState === 'active') refresh();
@@ -440,7 +456,8 @@ function Workspace() {
     setRole(nextRole);
   }
 
-  function enter(nextSession) {
+  function enter(rawSession) {
+    const nextSession = workspaceSession(rawSession);
     sessionRef.current = nextSession;
     setServerTasks(null);
     setEmployees([]);
@@ -473,7 +490,7 @@ function Workspace() {
     }
     setSavedQuickAccess(null);
     rememberCompany(nextSession);
-    setSetupSession(nextSession);
+    setSetupSession(workspaceSession(nextSession));
   }
 
   async function finishSetup(nextSession) {
@@ -634,13 +651,14 @@ function Workspace() {
     const current = sessionRef.current;
     if (!current) throw new Error('Войдите в аккаунт ещё раз.');
     const result = await apiRequest('/employees', { method: 'POST', body: fields, token: current.token });
+    const employee = workspaceUser(result.employee);
     if (sessionRef.current === current) {
       revision.current += 1;
-      setEmployees(previous => previous.some(employee => employee.id === result.employee.id)
+      setEmployees(previous => previous.some(row => row.id === employee.id)
         ? previous
-        : [...previous, result.employee]);
+        : [...previous, employee]);
     }
-    return { ...result.employee, invitationUrl: createEmployeeInvite(result.inviteToken), password: result.temporaryPassword ?? fields.password };
+    return { ...employee, invitationUrl: createEmployeeInvite(result.inviteToken), password: result.temporaryPassword ?? fields.password };
   }
 
   async function addSampleStaff() {
@@ -649,7 +667,8 @@ function Workspace() {
     if (!accounts.length) return;
 
     async function readRoster() {
-      const { employees: roster } = await apiRequest('/employees', { token: current.token });
+      const { employees } = await apiRequest('/employees', { token: current.token });
+      const roster = employees.map(workspaceUser);
       if (sessionRef.current === current) {
         revision.current += 1;
         setEmployees(previous => {
@@ -688,9 +707,10 @@ function Workspace() {
   async function setEmployeeDepartment(id, department) {
     const current = sessionRef.current;
     if (!current) throw new Error('Войдите в аккаунт ещё раз.');
-    const { employee } = await apiRequest(`/employees/${encodeURIComponent(id)}/department`, {
+    const result = await apiRequest(`/employees/${encodeURIComponent(id)}/department`, {
       method: 'PATCH', body: { department }, token: current.token,
     });
+    const employee = workspaceUser(result.employee);
     if (sessionRef.current === current) {
       revision.current += 1;
       setEmployees(previous => previous.map(row => row.id === employee.id ? employee : row));
@@ -701,14 +721,15 @@ function Workspace() {
   async function resetEmployeePassword(id, password) {
     const current = sessionRef.current;
     if (!current) throw new Error('Войдите в аккаунт ещё раз.');
-    const { employee, inviteToken, temporaryPassword } = await apiRequest(`/employees/${encodeURIComponent(id)}/reset-password`, {
+    const result = await apiRequest(`/employees/${encodeURIComponent(id)}/reset-password`, {
       method: 'POST', body: password ? { password } : {}, token: current.token,
     });
+    const employee = workspaceUser(result.employee);
     if (sessionRef.current === current) {
       revision.current += 1;
       setEmployees(previous => previous.map(row => row.id === employee.id ? employee : row));
     }
-    return { ...employee, invitationUrl: createEmployeeInvite(inviteToken), password: temporaryPassword ?? password };
+    return { ...employee, invitationUrl: createEmployeeInvite(result.inviteToken), password: result.temporaryPassword ?? password };
   }
 
   async function updateTask(nextTask) {

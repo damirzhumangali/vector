@@ -27,7 +27,7 @@ const screens = {
   login: ['Вход в qwork', 'Войдите по рабочей почте или своему логину.'],
   invite: ['Приглашение в qwork', 'Откройте приглашение и введите логин и пароль из сообщения с доступом.'],
   company: ['Вход по ссылке компании', 'Укажите компанию, в которую хотите войти.'],
-  register: ['Создайте компанию', 'Настройте рабочее пространство для выездных работ.'],
+  register: ['Создайте компанию', 'Вы получите доступ руководителя и сможете приглашать сотрудников.'],
   recovery: ['Восстановление доступа', 'Укажите логин или подтверждённую почту. Ссылку для нового пароля отправим на почту аккаунта.'],
 };
 
@@ -250,7 +250,7 @@ export default function AuthScreens({ onEnter, api, onDemo, invitationUrl = '', 
     const email = fields.email?.trim() ?? '';
     const password = fields.password ?? '';
     if (!company || !owner || !looksLikeEmail(email)) {
-      setError('Укажите компанию, имя диспетчера и рабочую почту.');
+      setError('Укажите компанию, имя руководителя и рабочую почту.');
       return;
     }
     if (password.length < 8) {
@@ -340,7 +340,7 @@ export default function AuthScreens({ onEnter, api, onDemo, invitationUrl = '', 
                 <Field label="Почта или логин" autoCapitalize="none" autoCorrect={false}
                   textContentType="username" returnKeyType="go" onSubmitEditing={recover} {...field('login')} />
                 <Button label={busy ? 'Отправляем…' : 'Отправить ссылку'} onPress={recover} disabled={busy} />
-                <Text style={styles.description}>Если подтверждённой почты нет, за новым временным паролем обратитесь к диспетчеру, создавшему компанию.</Text>
+                <Text style={styles.description}>Если подтверждённой почты нет, за новым временным паролем обратитесь к создателю компании.</Text>
               </>
             )
           )}
@@ -378,7 +378,7 @@ export default function AuthScreens({ onEnter, api, onDemo, invitationUrl = '', 
           {screen === 'register' && (
             <>
               <Field label="Название компании" icon="building" {...field('company')} />
-              <Field label="Имя диспетчера" autoCapitalize="words" {...field('owner')} />
+              <Field label="Имя руководителя" autoCapitalize="words" {...field('owner')} />
               <Field
                 label="Рабочая почта"
                 icon="user"
@@ -407,7 +407,8 @@ export default function AuthScreens({ onEnter, api, onDemo, invitationUrl = '', 
               <Text style={styles.previewTitle}>Демо-режим</Text>
               <Text style={styles.description}>Посмотрите рабочий экран с локальными демоданными.</Text>
             </View>
-            <Button label="Открыть демо" tone="secondary" disabled={busy} onPress={() => onDemo('employee')} />
+            <Button label="Демо сотрудника" tone="secondary" disabled={busy} onPress={() => onDemo('employee')} />
+            <Button label="Демо руководителя" tone="secondary" disabled={busy} onPress={() => onDemo('manager')} />
           </View>
         )}
       </ScrollView>

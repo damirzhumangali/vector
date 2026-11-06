@@ -47,7 +47,8 @@ final class Trips {
     private static final DateTimeFormatter STAMP = new DateTimeFormatterBuilder().appendInstant(3).toFormatter();
     private static final Set<String> UNLINKABLE = Set.of("unassigned", "cancelled", "repeated", "refused");
     private static final String SELECT = """
-        SELECT trip.*, employee.name AS employee_name, offer.id AS offer_id, offer.comment AS offer_comment
+        SELECT trip.*, employee.name AS employee_name, offer.id AS offer_id, offer.comment AS offer_comment,
+            offer.self_requested AS offer_self_requested
         FROM work_trips trip
         JOIN users employee ON employee.id = trip.employee_id AND employee.company_id = trip.company_id
         LEFT JOIN work_trip_offers offer ON offer.trip_id = trip.id AND offer.company_id = trip.company_id
@@ -84,21 +85,6 @@ final class Trips {
         if (!employee) return Map.of("trips", trips);
         var mode = Db.one(db, "SELECT work_mode FROM employee_work_modes WHERE employee_id = ?", employeeId);
         return Map.of("trips", trips, "workMode", mode == null ? "stationary" : mode.get("work_mode"));
-    }
-
-    static Map<String, Object> create(Connection db, Map<String, Object> user, Map<String, Object> body)
-            throws SQLException {
-        requireOffice(user);
-        long company = number(user, "company_id");
-        long employee = identifier(body.get("employeeId"), "Сотрудник");
-        var destination = destination(db, user, body, null);
-        String basis = field(body, "basis", "Основание", 500, true);
-        String purpose = field(body, "purpose", "Цель командировки", 1000, false);
-        String start = plannedTime(body, "plannedStart", "Начало командировки");
-        String end = plannedTime(body, "plannedEnd", "Окончание командировки");
-        long id = schedule(db, company, employee, number(user, "id"), destination, basis, purpose, start, end,
-            taskIds(body.get("taskIds"), true), TripBudget.read(body.get("budget")), null);
-        return report(db, user, id);
     }
 
     static Destination destination(Connection db, Map<String, Object> user, Map<String, Object> body, String fallback)
@@ -139,11 +125,12 @@ final class Trips {
         if (estimate) {
             if (!isEmployee(user)) throw error(403, "Оценку расходов заполняет сотрудник.");
         } else {
-            requireOffice(user);
+            Accounts.requireManager(user);
         }
         var trip = find(db, user, id);
+        if (selfRequested(trip)) throw error(409, "Расчёт расходов уже прошёл согласование.");
         if (estimate && trip.get("offer_id") != null) {
-            throw error(409, "Ставка уже согласована диспетчером.");
+            throw error(409, "Ставка уже согласована руководителем.");
         }
         String amountColumn = estimate ? "estimate" : "budget";
         Db.update(db, "UPDATE work_trips SET " + amountColumn + " = ? WHERE id = ? AND company_id = ?",
@@ -151,9 +138,13 @@ final class Trips {
         return report(db, user, id);
     }
 
+    private static boolean selfRequested(Map<String, Object> trip) {
+        return trip.get("offer_self_requested") instanceof Number value && value.intValue() == 1;
+    }
+
     static Map<String, Object> attachTasks(Connection db, Map<String, Object> user, long id, Map<String, Object> body)
             throws SQLException {
-        requireOffice(user);
+        Accounts.requireManager(user);
         long company = number(user, "company_id");
         long employee = number(find(db, user, id), "employee_id");
         lockEmployee(db, company, employee);
@@ -265,12 +256,6 @@ final class Trips {
         return Map.of("trip", trip, "tasks", tasks, "summary", summary);
     }
 
-    static void requireOffice(Map<String, Object> user) {
-        if (!Set.of("dispatcher", "manager").contains(user.get("role"))) {
-            throw error(403, "Раздел доступен диспетчеру и руководителю.");
-        }
-    }
-
     static void lockEmployee(Connection db, long company, long employee) throws SQLException {
         if (Db.one(db, "SELECT id FROM users WHERE company_id = ? AND id = ? AND role = 'employee'"
                 + (Db.postgres() ? " FOR UPDATE" : ""), company, employee) == null) {
@@ -332,6 +317,7 @@ final class Trips {
         out.put("basis", row.get("basis"));
         out.put("purpose", row.get("purpose"));
         out.put("offerId", row.get("offer_id") == null ? null : row.get("offer_id").toString());
+        out.put("selfRequested", selfRequested(row));
         out.put("comment", row.get("offer_comment"));
         out.put("plannedStart", row.get("planned_start"));
         out.put("plannedEnd", row.get("planned_end"));

@@ -24,12 +24,14 @@ final class ImportSqlite {
         "field_work_defaults", "task_representative_reviews", "work_trips", "work_trip_tasks", "employee_work_modes",
         "work_trip_requests", "work_trip_request_tasks", "task_assignment_changes", "planning_import_runs",
         "push_devices", "incident_push_jobs", "work_trip_offers", "work_trip_offer_history", "work_trip_route_stops",
-        "work_trip_actual_expenses");
+        "work_trip_actual_expenses", "trip_organizations", "trip_approval_settings", "work_trip_offer_approvals");
     private static final List<Table> TABLES = List.of(
         new Table("companies", "id code name", ""),
+        new Table("trip_organizations", "company_id name_key name", ""),
         new Table("users", "id company_id name login role is_owner password_hash password_salt",
             "last_login_at invite_hash invite_expires_at invite_required department "
                 + "email email_verified email_verify_hash email_verify_expires_at"),
+        new Table("trip_approval_settings", "company_id position approver_id", ""),
         new Table("sessions", "token_hash user_id expires_at", ""),
         new Table("push_devices", "token session_hash", ""),
         new Table("work_sites", "id company_id name address latitude longitude radius", ""),
@@ -50,7 +52,9 @@ final class ImportSqlite {
         new Table("work_trip_offers",
             "id company_id employee_id created_by destination address purpose comment revision created_at",
             "request_id object_id planned_start planned_end daily_rate proposed_at trip_id confirmed_at confirmed_by "
-                + "proposal_estimate declined_at"),
+                + "proposal_estimate declined_at self_requested"),
+        new Table("work_trip_offer_approvals", "offer_id position approver_id reason",
+            "decision decided_at decided_revision"),
         new Table("work_trip_offer_history", "offer_id revision kind actor_id happened_at reason",
             "planned_start planned_end proposed_at proposal_estimate"),
         new Table("work_trip_route_stops", "id offer_id position destination skip_reason", "planned_at visited_at skipped_at"),
@@ -165,6 +169,7 @@ final class ImportSqlite {
                 boolean hasEmailColumn = columns.entrySet().stream()
                     .anyMatch(entry -> entry.getKey().name().equals("users") && entry.getValue().contains("email"));
                 if (!hasEmailColumn) Db.update(target, "UPDATE users SET email = login WHERE is_owner = 1");
+                Db.update(target, "UPDATE users SET role = 'manager' WHERE role = 'dispatcher'");
                 Db.update(target, """
                     INSERT INTO login_registry(login, user_id)
                     SELECT login, CASE WHEN COUNT(*) = 1 THEN MIN(id) ELSE NULL END

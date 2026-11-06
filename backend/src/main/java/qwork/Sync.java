@@ -160,7 +160,7 @@ final class Sync {
     }
 
     static Map<String, Object> conflicts(Connection db, Map<String, Object> user) throws SQLException {
-        requireManager(user);
+        Accounts.requireManager(user);
         var records = Db.rows(db, CONFLICT_SELECT + """
              ORDER BY CASE WHEN e.resolved_at IS NULL THEN 0 ELSE 1 END,
                 e.received_at DESC, e.event_id DESC LIMIT 200
@@ -173,7 +173,7 @@ final class Sync {
     }
 
     static Map<String, Object> resolve(Connection db, Map<String, Object> user, String id) throws SQLException {
-        requireManager(user);
+        Accounts.requireManager(user);
         long companyId = number(user, "company_id");
         String eventId = eventId(id);
         Db.update(db, """
@@ -344,11 +344,5 @@ final class Sync {
         byte[] canonical = Db.JSON.writer(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS)
             .writeValueAsBytes(Map.of("taskId", taskId, "kind", kind, "occurredAt", occurredAt.toString(), "body", body));
         return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(canonical));
-    }
-
-    private static void requireManager(Map<String, Object> user) {
-        if (!"manager".equals(user.get("role"))) {
-            throw error(403, "Конфликты синхронизации доступны руководителю.");
-        }
     }
 }

@@ -65,7 +65,7 @@ final class Main {
     private static final Pattern TRIP_ACTUAL_EXPENSES = Pattern.compile("/trips/([0-9]{1,19})/actual-expenses");
     private static final Pattern TRIP_STOP = Pattern.compile("/trips/([0-9]{1,19})/stops/([0-9]{1,19})");
     private static final Pattern TRIP_REQUEST_DECISION = Pattern.compile("/trip-requests/([0-9]{1,19})/decision");
-    private static final Pattern TRIP_OFFER_ACTION = Pattern.compile("/trip-offers/([0-9]{1,19})/(proposal|confirm|revise|decline)");
+    private static final Pattern TRIP_OFFER_ACTION = Pattern.compile("/trip-offers/([0-9]{1,19})/(proposal|confirm|revise|decline|approval)");
 
     private record Attempts(long start, int count) {}
     private record Result(int status, Map<String, Object> body, byte[] image) {
@@ -267,8 +267,8 @@ final class Main {
             case "POST /tasks" -> payload(exchange, MAX_REPORT_BODY);
             case "POST /employees", "POST /objects", "POST /shifts", "POST /notifications/device",
                  "POST /shifts/calendar", "POST /incidents", "POST /planning/templates",
-                 "POST /planning/assignment-settings", "POST /field-work/defaults", "POST /trips",
-                 "POST /field-control/work-mode", "POST /trip-offers" -> payload(exchange);
+                 "POST /planning/assignment-settings", "POST /field-work/defaults", "POST /trip-approval-settings",
+                 "POST /field-control/work-mode", "POST /trip-offers", "POST /trip-organizations" -> payload(exchange);
             case "POST /planning/import", "POST /planning/import/preview", "POST /trip-offers/import" -> payload(exchange, MAX_IMPORT_BODY);
             case "POST /sync/events" -> payload(exchange, MAX_PHOTO_BODY);
             default -> {
@@ -295,6 +295,11 @@ final class Main {
             if (Db.postgres() && "GET".equals(method) && ("/trip-offers".equals(path)
                     || (path.endsWith("/report") && TRIP_ACTION.matcher(path).matches()))) {
                 db.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+            } else if (Db.postgres() && "POST".equals(method)
+                    && ("/trip-offers/import".equals(path) || "/trip-organizations".equals(path)
+                        || "/trip-offers".equals(path) || "/trip-approval-settings".equals(path)
+                        || TRIP_OFFER_ACTION.matcher(path).matches())) {
+                db.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
             }
             var user = Accounts.authenticate(db, token);
             var result = authenticated(db, user, token, method, path, payload,
@@ -383,10 +388,14 @@ final class Main {
             case "GET /field-work/defaults": return ok(FieldWork.defaults(db, user));
             case "POST /field-work/defaults": return ok(FieldWork.saveDefault(db, user, payload));
             case "GET /trips": return ok(Trips.list(db, user));
-            case "POST /trips": return created(Trips.create(db, user, payload));
+            case "POST /trips", "POST /trip-requests":
+                throw Domain.error(403, "Сотрудник отправляет командировку на согласование в разделе «Выезды».");
             case "GET /trip-requests": return ok(TripRequests.list(db, user));
-            case "POST /trip-requests": throw Domain.error(403, "Командировку назначает диспетчер.");
             case "GET /trip-offers": return ok(TripOffers.list(db, user));
+            case "GET /trip-destinations": return ok(Places.tripDestinations(db, user));
+            case "GET /trip-approval-settings": return ok(TripApprovals.settings(db, user));
+            case "POST /trip-approval-settings": return ok(TripApprovals.saveSettings(db, user, payload));
+            case "POST /trip-organizations": return ok(TripOrganizations.save(db, user, payload));
             case "GET /trip-offers/import/template": return ok(TripXlsxImport.template(user));
             case "POST /trip-offers": return created(TripOffers.create(db, user, payload));
             case "POST /trip-offers/import": return ok(TripXlsxImport.process(db, user, payload));
@@ -454,6 +463,7 @@ final class Main {
                 case "confirm" -> TripOffers.confirm(db, user, offerId, payload);
                 case "revise" -> TripOffers.revise(db, user, offerId, payload);
                 case "decline" -> TripOffers.decline(db, user, offerId, payload);
+                case "approval" -> TripOffers.approve(db, user, offerId, payload);
                 default -> throw Domain.error(404, "Маршрут не найден.");
             });
         }

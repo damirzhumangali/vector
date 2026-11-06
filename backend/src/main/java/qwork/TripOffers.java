@@ -29,6 +29,7 @@ final class TripOffers {
             trip_id INTEGER UNIQUE REFERENCES work_trips(id),
             confirmed_at TEXT, confirmed_by INTEGER REFERENCES users(id),
             revision INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL,
+            self_requested INTEGER NOT NULL DEFAULT 0 CHECK (self_requested IN (0, 1)),
             UNIQUE (company_id, created_by, request_id),
             CHECK ((planned_start IS NULL) = (planned_end IS NULL)),
             CHECK ((planned_start IS NULL) = (daily_rate IS NULL)),
@@ -77,34 +78,65 @@ final class TripOffers {
     static Map<String, Object> list(Connection db, Map<String, Object> user) throws SQLException {
         long company = number(user, "company_id");
         boolean employee = Trips.isEmployee(user);
-        String scope = employee ? " AND r.employee_id = ?" : "";
+        if (!employee) Accounts.requireManager(user);
+        String scope = employee ? " AND r.employee_id = ?" : " AND (r.self_requested = 0 OR r.planned_start IS NOT NULL)";
         Object[] parameters = employee ? new Object[] {company, number(user, "id")} : new Object[] {company};
         var rows = Db.rows(db, SELECT + scope + " ORDER BY r.created_at DESC, r.id DESC", parameters);
-        return Map.of("offers", details(db, rows, scope, parameters), "supportsTripRoutes", true, "supportsTripImport", true);
+        return Map.of("offers", details(db, user, rows, scope, parameters), "supportsTripRoutes", true,
+            "supportsSingleStopRoutes", true, "supportsTripImport", true,
+            "supportsTripOrganizations", true, "supportsTripObjectCity", true, "supportsTripSelfService", true,
+            "organizations", TripOrganizations.list(db, user));
     }
 
     static Map<String, Object> create(Connection db, Map<String, Object> user, Map<String, Object> body) throws SQLException {
-        return result(db, find(db, user, createId(db, user, body)));
+        requireEmployee(user);
+        if (!body.containsKey("requestId")) throw error(400, "Укажите идентификатор отправки командировки.");
+        var terms = proposedTerms(body);
+        long id = createDraft(db, user, body);
+        var row = find(db, user, id);
+        var plan = TripRoutes.initialPlan(db, id, body.get("visitTimes"), terms.start(), terms.end());
+        var current = Proposal.from(row);
+        if (current == null) {
+            saveProposal(db, user, row, terms, plan);
+        } else if (!sameProposal(current, terms, plan)) {
+            throw error(409, "Этот идентификатор отправки уже использован для других условий командировки.");
+        }
+        return result(db, user, find(db, user, id));
     }
 
-    static long createId(Connection db, Map<String, Object> user, Map<String, Object> body) throws SQLException {
-        Accounts.requireDispatcher(user);
+    static long createDraft(Connection db, Map<String, Object> user, Map<String, Object> body) throws SQLException {
+        requireEmployee(user);
         long company = number(user, "company_id");
-        long dispatcher = number(user, "id");
-        long employee = Trips.identifier(body.get("employeeId"), "Сотрудник");
+        long employee = number(user, "id");
         String requestId = requestId(body);
+        if (!(body.getOrDefault("scheduleVisit", false) instanceof Boolean scheduleVisit)) {
+            throw error(400, "Проверьте настройку времени посещения.");
+        }
         var destinations = TripRoutes.destinations(body);
+        if (scheduleVisit && (body.get("objectId") == null || !destinations.isEmpty())) {
+            throw error(400, "Для отдельного времени посещения выберите один объект из справочника.");
+        }
         var destination = destinations.isEmpty() ? Trips.destination(db, user, body, null)
             : new Trips.Destination(null, destinations.getFirst(), "");
+        String city = field(body, "city", "Город", 300, true);
+        if (!city.isEmpty()) {
+            if (destination.objectId() == null) {
+                throw error(400, "Укажите город вместе с объектом из справочника.");
+            }
+            String name = field(Map.of("destination", city + " · " + destination.name()),
+                "destination", "Город и название объекта", 300, false);
+            destination = new Trips.Destination(destination.objectId(), name, destination.address());
+        }
+        if (destination.objectId() != null) destinations = List.of(destination.name());
         String purpose = field(body, "purpose", "Что нужно сделать", 1000, false);
         String comment = field(body, "comment", "Комментарий", 1000, true);
         Trips.lockEmployee(db, company, employee);
         var inserted = Db.one(db, """
             INSERT INTO work_trip_offers(company_id, employee_id, created_by, request_id,
-                destination, object_id, address, purpose, comment, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                destination, object_id, address, purpose, comment, created_at, self_requested)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
             ON CONFLICT (company_id, created_by, request_id) DO NOTHING RETURNING id
-            """, company, employee, dispatcher, requestId, destination.name(), destination.objectId(),
+            """, company, employee, employee, requestId, destination.name(), destination.objectId(),
             destination.address(), purpose, comment, Trips.now());
         if (inserted != null) {
             long offerId = number(inserted, "id");
@@ -112,8 +144,8 @@ final class TripOffers {
             return offerId;
         }
 
-        var existing = Db.one(db, SELECT + " AND r.created_by = ? AND r.request_id = ?", company, dispatcher, requestId);
-        if (existing == null || number(existing, "employee_id") != employee
+        var existing = Db.one(db, SELECT + " AND r.created_by = ? AND r.request_id = ?", company, employee, requestId);
+        if (existing == null || !selfRequested(existing) || number(existing, "employee_id") != employee
                 || !Objects.equals(Objects.toString(existing.get("object_id"), null), Objects.toString(destination.objectId(), null))
                 || !destination.name().equals(existing.get("destination")) || !destination.address().equals(existing.get("address"))
                 || !purpose.equals(existing.get("purpose")) || !comment.equals(existing.get("comment"))
@@ -128,65 +160,114 @@ final class TripOffers {
         if (!Trips.isEmployee(user)) throw error(403, "Даты и ставку предлагает назначенный сотрудник.");
         var row = lockAndFind(db, user, id);
         requireNotDeclined(row);
-        String start = Trips.plannedTime(body, "plannedStart", "Начало командировки");
-        String end = Trips.plannedTime(body, "plannedEnd", "Окончание командировки");
-        if (end.compareTo(start) <= 0) throw error(400, "Окончание командировки должно быть позже начала.");
-        var estimate = proposalEstimate(body);
-        var plan = TripRoutes.plan(db, id, body.get("stops"), start, end);
-        var current = Proposal.from(row);
-        if (current != null && start.equals(current.start()) && end.equals(current.end())
-                && estimate.equals(current.estimate()) && plan.unchanged()) {
-            return result(db, row);
+        var terms = proposedTerms(body);
+        var plan = TripRoutes.plan(db, id, body.get("stops"), terms.start(), terms.end());
+        if (selfRequested(row) && !body.containsKey("expectedRevision")) {
+            throw error(400, "Обновите карточку перед отправкой командировки.");
         }
+        var current = Proposal.from(row);
+        if (current != null && sameProposal(current, terms, plan)) return result(db, user, row);
+        if (selfRequested(row) && current != null) throw error(409, "Командировка уже отправлена на согласование.");
         if (row.get("trip_id") != null) throw error(409, "Командировка уже согласована.");
         if (!plan.times().isEmpty() && !body.containsKey("expectedRevision")) {
             throw error(400, "Обновите карточку, чтобы предложить маршрут.");
         }
         checkRevision(row, body);
         preserveLegacyProposal(db, row, current);
+        saveProposal(db, user, row, terms, plan);
+        return result(db, user, find(db, user, id));
+    }
+
+    private static Proposal proposedTerms(Map<String, Object> body) {
+        String start = Trips.plannedTime(body, "plannedStart", "Начало командировки");
+        String end = Trips.plannedTime(body, "plannedEnd", "Окончание командировки");
+        if (end.compareTo(start) <= 0) throw error(400, "Окончание командировки должно быть позже начала.");
+        return new Proposal(start, end, null, proposalEstimate(body));
+    }
+
+    private static boolean sameProposal(Proposal current, Proposal terms, TripRoutes.Plan plan) {
+        return current.start().equals(terms.start()) && current.end().equals(terms.end())
+            && current.estimate().equals(terms.estimate()) && plan.unchanged();
+    }
+
+    private static void saveProposal(Connection db, Map<String, Object> user, Map<String, Object> row, Proposal terms,
+                                     TripRoutes.Plan plan) throws SQLException {
+        long id = number(row, "id");
+        long company = number(row, "company_id");
+        if (selfRequested(row)) TripApprovals.begin(db, company, id);
         String proposedAt = Trips.now();
+        var estimate = terms.estimate();
         Db.update(db, """
             UPDATE work_trip_offers SET planned_start = ?, planned_end = ?, daily_rate = ?, proposed_at = ?,
                 proposal_estimate = ?, revision = revision + 1 WHERE company_id = ? AND id = ?
-            """, start, end, estimate.dailyRate(), proposedAt, TripBudget.store(estimate), number(user, "company_id"), id);
+            """, terms.start(), terms.end(), estimate.dailyRate(), proposedAt, TripBudget.store(estimate), company, id);
         if (!plan.unchanged()) TripRoutes.savePlan(db, id, plan);
-        recordHistory(db, user, row, "proposal", "", proposedAt, new Proposal(start, end, proposedAt, estimate));
-        return result(db, find(db, user, id));
+        recordHistory(db, user, row, "proposal", "", proposedAt,
+            new Proposal(terms.start(), terms.end(), proposedAt, estimate));
+    }
+
+    static Map<String, Object> approve(Connection db, Map<String, Object> user, long id, Map<String, Object> body)
+            throws SQLException {
+        Accounts.requireManager(user);
+        var row = lockAndFind(db, user, id);
+        if (!selfRequested(row)) throw error(409, "Для этой командировки действует прежний порядок подтверждения.");
+        long company = number(row, "company_id");
+        long revision = number(row, "revision");
+        var stages = TripApprovals.forOffers(db, " AND r.id = ?", new Object[] {company, id}).getOrDefault(id, List.of());
+        var decision = TripApprovals.decide(stages, number(user, "id"), revisionNumber(body.get("expectedRevision")),
+            revision, body);
+        if (!decision.retry()) {
+            String at = Trips.now();
+            TripApprovals.record(db, id, decision, revision + 1, at);
+            if (TripApprovals.isFinalApproval(decision)) {
+                schedule(db, user, row, Proposal.from(row), at);
+            } else {
+                Db.update(db, "UPDATE work_trip_offers SET revision = revision + 1 WHERE company_id = ? AND id = ?",
+                    company, id);
+            }
+        }
+        return result(db, user, find(db, user, id));
     }
 
     static Map<String, Object> confirm(Connection db, Map<String, Object> user, long id, Map<String, Object> body)
             throws SQLException {
-        Accounts.requireDispatcher(user);
-        long company = number(user, "company_id");
+        Accounts.requireManager(user);
         var row = lockAndFind(db, user, id);
+        requireLegacy(row);
         requireNotDeclined(row);
-        if (row.get("trip_id") != null) return result(db, row);
+        if (row.get("trip_id") != null) return result(db, user, row);
         checkRevision(row, body);
         var proposal = Proposal.from(row);
         if (proposal == null) throw error(409, "Дождитесь дат и ставки от сотрудника.");
         preserveLegacyProposal(db, row, proposal);
+        schedule(db, user, row, proposal, Trips.now());
+        return result(db, user, find(db, user, id));
+    }
+
+    private static void schedule(Connection db, Map<String, Object> user, Map<String, Object> row, Proposal proposal,
+                                 String confirmedAt) throws SQLException {
+        long company = number(row, "company_id");
         var place = new Trips.Destination(row.get("object_id") == null ? null : number(row, "object_id"),
             (String) row.get("destination"), (String) row.get("address"));
         long trip = Trips.schedule(db, company, number(row, "employee_id"), number(row, "created_by"),
             place, "", (String) row.get("purpose"), proposal.start(), proposal.end(), List.of(), null, proposal.estimate());
-        String confirmedAt = Trips.now();
         Db.update(db, """
             UPDATE work_trip_offers SET trip_id = ?, confirmed_at = ?, confirmed_by = ?, revision = revision + 1
             WHERE company_id = ? AND id = ?
-            """, trip, confirmedAt, number(user, "id"), company, id);
+            """, trip, confirmedAt, number(user, "id"), company, number(row, "id"));
         recordHistory(db, user, row, "confirmed", "", confirmedAt, proposal);
-        return result(db, find(db, user, id));
     }
 
     static Map<String, Object> revise(Connection db, Map<String, Object> user, long id, Map<String, Object> body)
             throws SQLException {
-        Accounts.requireDispatcher(user);
+        Accounts.requireManager(user);
         var row = lockAndFind(db, user, id);
+        requireLegacy(row);
         requireNotDeclined(row);
         if (row.get("trip_id") != null) throw error(409, "Командировка уже согласована.");
         String reason = field(body, "reason", "Что нужно уточнить", 500, false);
         var proposal = Proposal.from(row);
-        if (proposal == null && matchesLatestHistory(db, row, "revision_requested", reason)) return result(db, row);
+        if (proposal == null && matchesLatestHistory(db, row, "revision_requested", reason)) return result(db, user, row);
         checkRevision(row, body);
         if (proposal == null) throw error(409, "Дождитесь дат и ставки от сотрудника.");
         preserveLegacyProposal(db, row, proposal);
@@ -196,16 +277,17 @@ final class TripOffers {
             WHERE company_id = ? AND id = ?
             """, number(user, "company_id"), id);
         recordHistory(db, user, row, "revision_requested", reason, Trips.now(), proposal);
-        return result(db, find(db, user, id));
+        return result(db, user, find(db, user, id));
     }
 
     static Map<String, Object> decline(Connection db, Map<String, Object> user, long id, Map<String, Object> body)
             throws SQLException {
         if (!Trips.isEmployee(user)) throw error(403, "Об отказе сообщает назначенный сотрудник.");
         var row = lockAndFind(db, user, id);
+        requireLegacy(row);
         if (row.get("trip_id") != null) throw error(409, "Командировка уже согласована.");
         String reason = field(body, "reason", "Причина отказа", 500, false);
-        if (row.get("declined_at") != null && matchesLatestHistory(db, row, "declined", reason)) return result(db, row);
+        if (row.get("declined_at") != null && matchesLatestHistory(db, row, "declined", reason)) return result(db, user, row);
         requireNotDeclined(row);
         checkRevision(row, body);
         var proposal = Proposal.from(row);
@@ -215,7 +297,7 @@ final class TripOffers {
             UPDATE work_trip_offers SET declined_at = ?, revision = revision + 1 WHERE company_id = ? AND id = ?
             """, declinedAt, number(user, "company_id"), id);
         recordHistory(db, user, row, "declined", reason, declinedAt, proposal);
-        return result(db, find(db, user, id));
+        return result(db, user, find(db, user, id));
     }
 
     private static Map<String, Object> lockAndFind(Connection db, Map<String, Object> user, long id) throws SQLException {
@@ -226,7 +308,9 @@ final class TripOffers {
 
     private static Map<String, Object> find(Connection db, Map<String, Object> user, long id) throws SQLException {
         var row = Db.one(db, SELECT + " AND r.id = ?", number(user, "company_id"), id);
-        if (row == null || (Trips.isEmployee(user) && number(row, "employee_id") != number(user, "id"))) {
+        boolean employee = Trips.isEmployee(user);
+        if (row == null || (employee && number(row, "employee_id") != number(user, "id"))
+                || (!employee && selfRequested(row) && row.get("planned_start") == null)) {
             throw error(404, "Назначение на командировку не найдено.");
         }
         return row;
@@ -234,12 +318,16 @@ final class TripOffers {
 
     private static void checkRevision(Map<String, Object> row, Map<String, Object> body) {
         Object requested = body.getOrDefault("expectedRevision", row.get("revision"));
+        if (revisionNumber(requested) != number(row, "revision")) {
+            throw error(409, "Условия командировки изменились. Обновите карточку.");
+        }
+    }
+
+    private static long revisionNumber(Object requested) {
         if (!(requested instanceof Integer || requested instanceof Long) || ((Number) requested).longValue() < 1) {
             throw error(400, "Некорректная версия командировки.");
         }
-        if (((Number) requested).longValue() != number(row, "revision")) {
-            throw error(409, "Условия командировки изменились. Обновите карточку.");
-        }
+        return ((Number) requested).longValue();
     }
 
     private static TripBudget proposalEstimate(Map<String, Object> body) {
@@ -265,6 +353,18 @@ final class TripOffers {
 
     private static void requireNotDeclined(Map<String, Object> row) {
         if (row.get("declined_at") != null) throw error(409, "Сотрудник уже отказался от командировки.");
+    }
+
+    private static boolean selfRequested(Map<String, Object> row) {
+        return number(row, "self_requested") != 0;
+    }
+
+    private static void requireLegacy(Map<String, Object> row) {
+        if (selfRequested(row)) throw error(409, "Для этой командировки действует маршрут согласования.");
+    }
+
+    private static void requireEmployee(Map<String, Object> user) {
+        if (!Trips.isEmployee(user)) throw error(403, "Командировку подаёт сотрудник из своего аккаунта.");
     }
 
     private static boolean matchesLatestHistory(Connection db, Map<String, Object> row, String kind, String reason)
@@ -297,13 +397,15 @@ final class TripOffers {
             proposal == null ? null : proposal.at(), proposal == null ? null : TripBudget.store(proposal.estimate()));
     }
 
-    private static Map<String, Object> result(Connection db, Map<String, Object> row) throws SQLException {
-        return Map.of("offer", details(db, List.of(row), " AND r.id = ?",
+    private static Map<String, Object> result(Connection db, Map<String, Object> user, Map<String, Object> row)
+            throws SQLException {
+        return Map.of("offer", details(db, user, List.of(row), " AND r.id = ?",
             new Object[] {number(row, "company_id"), number(row, "id")}).getFirst());
     }
 
-    private static List<Map<String, Object>> details(Connection db, List<Map<String, Object>> rows,
-                                                       String scope, Object[] parameters) throws SQLException {
+    private static List<Map<String, Object>> details(Connection db, Map<String, Object> user,
+                                                      List<Map<String, Object>> rows, String scope, Object[] parameters)
+            throws SQLException {
         if (rows.isEmpty()) return List.of();
         var history = new LinkedHashMap<Long, List<Map<String, Object>>>();
         for (var item : Db.rows(db, """
@@ -313,27 +415,37 @@ final class TripOffers {
             """ + scope + " ORDER BY h.offer_id, h.revision", parameters)) {
             history.computeIfAbsent(number(item, "offer_id"), id -> new ArrayList<>()).add(item);
         }
-        boolean awaitingConfirmation = rows.stream().anyMatch(row -> "awaiting_confirmation".equals(status(row)));
-        var conflicts = awaitingConfirmation ? TripScheduleConflicts.read(db, TripScheduleConflicts.Source.OFFER, scope, parameters)
+        var approvals = TripApprovals.forOffers(db, scope, parameters);
+        boolean awaitingDecision = rows.stream().anyMatch(row -> awaitingDecision(status(row,
+            approvals.getOrDefault(number(row, "id"), List.of()))));
+        var conflicts = awaitingDecision ? TripScheduleConflicts.read(db, TripScheduleConflicts.Source.OFFER, scope, parameters)
             : Map.<Long, TripScheduleConflicts.Conflicts>of();
         var routes = TripRoutes.forOffers(db, scope, parameters);
         return rows.stream().map(row -> {
             long id = number(row, "id");
-            return json(row, history.getOrDefault(id, List.of()), conflicts.getOrDefault(id, TripScheduleConflicts.EMPTY),
-                routes.getOrDefault(id, List.of()));
+            return json(user, row, history.getOrDefault(id, List.of()), conflicts.getOrDefault(id, TripScheduleConflicts.EMPTY),
+                routes.getOrDefault(id, List.of()), approvals.getOrDefault(id, List.of()));
         }).toList();
     }
 
-    private static String status(Map<String, Object> row) {
+    private static String status(Map<String, Object> row, List<TripApprovals.Stage> stages) {
         if (row.get("declined_at") != null) return "declined";
         if (row.get("trip_id") != null) return "confirmed";
-        return row.get("planned_start") == null ? "awaiting_employee" : "awaiting_confirmation";
+        if (row.get("planned_start") == null) return "awaiting_employee";
+        if (!selfRequested(row)) return "awaiting_confirmation";
+        return stages.stream().anyMatch(stage -> "rejected".equals(stage.decision())) ? "rejected" : "awaiting_approval";
     }
 
-    private static Map<String, Object> json(Map<String, Object> row, List<Map<String, Object>> events,
-                                            TripScheduleConflicts.Conflicts conflicts, List<Map<String, Object>> route) {
+    private static boolean awaitingDecision(String status) {
+        return "awaiting_confirmation".equals(status) || "awaiting_approval".equals(status);
+    }
+
+    private static Map<String, Object> json(Map<String, Object> user, Map<String, Object> row, List<Map<String, Object>> events,
+                                            TripScheduleConflicts.Conflicts conflicts, List<Map<String, Object>> route,
+                                            List<TripApprovals.Stage> stages) {
         var out = new LinkedHashMap<String, Object>();
-        String status = status(row);
+        String status = status(row, stages);
+        var active = TripApprovals.active(stages);
         out.put("id", row.get("id").toString());
         out.put("employeeId", row.get("employee_id").toString());
         out.put("employeeName", row.get("employee_name"));
@@ -344,13 +456,16 @@ final class TripOffers {
         out.put("comment", row.get("comment"));
         out.put("stops", route);
         out.put("status", status);
+        out.put("selfRequested", selfRequested(row));
+        out.put("approvalStages", stages.stream().map(stage -> stage.json(active)).toList());
+        out.put("canDecideApproval", active != null && Accounts.isManager(user) && active.approverId() == number(user, "id"));
         out.putAll(proposalJson(Proposal.from(row)));
         out.put("tripId", Objects.toString(row.get("trip_id"), null));
         out.put("revision", row.get("revision"));
         out.put("createdAt", row.get("created_at"));
         out.put("confirmedAt", row.get("confirmed_at"));
         out.put("declinedAt", row.get("declined_at"));
-        out.put("conflicts", ("awaiting_confirmation".equals(status) ? conflicts : TripScheduleConflicts.EMPTY).json());
+        out.put("conflicts", (awaitingDecision(status) ? conflicts : TripScheduleConflicts.EMPTY).json());
         var history = new ArrayList<Map<String, Object>>();
         Map<String, Object> previousProposal = null;
         String revisionReason = null;

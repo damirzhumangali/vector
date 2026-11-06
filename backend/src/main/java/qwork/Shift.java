@@ -133,7 +133,7 @@ final class Shift {
 
     static Map<String, Object> create(Connection db, Map<String, Object> user, Map<String, Object> body)
             throws SQLException {
-        requireOffice(user);
+        Accounts.requireManager(user);
         long company = number(user, "company_id");
         long employee = identifier(body, "employeeId", "Сотрудник");
         OffsetDateTime starts = dateTime(body, "startsAt", "Начало смены");
@@ -178,7 +178,7 @@ final class Shift {
 
     static Map<String, Object> saveDay(Connection db, Map<String, Object> user, Map<String, Object> body)
             throws SQLException {
-        requireOffice(user);
+        Accounts.requireManager(user);
         long company = number(user, "company_id");
         LocalDate date = date(body, "date");
         String type = field(body, "type", "Тип дня", 12, false);
@@ -268,7 +268,7 @@ final class Shift {
 
     static Map<String, Object> transfer(Connection db, Map<String, Object> user, long id, Map<String, Object> body)
             throws Exception {
-        requireOffice(user);
+        Accounts.requireManager(user);
         long company = number(user, "company_id");
         long assignee = identifier(body, "assigneeId", "Новый исполнитель");
         lockShift(db, company, id);
@@ -433,12 +433,6 @@ final class Shift {
             return OffsetDateTime.parse(field(body, key, label, 40, false));
         } catch (DateTimeParseException invalid) {
             throw error(400, "Укажите дату и время с часовым поясом.");
-        }
-    }
-
-    private static void requireOffice(Map<String, Object> user) {
-        if (!Set.of("dispatcher", "manager").contains(user.get("role"))) {
-            throw error(403, "Календарь и передачи настраивает диспетчер или руководитель.");
         }
     }
 }

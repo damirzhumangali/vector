@@ -18,7 +18,7 @@ const PHOTO_LABELS = {
   before: 'Фото «до»',
   after: 'Фото «после»',
   checklist: 'Фото к пункту чек-листа',
-  material: 'Материал диспетчера',
+  material: 'Материал руководителя',
 };
 
 function PhotoButton({ children, disabled = false, onPress, secondary = false, icon, tile = false }) {

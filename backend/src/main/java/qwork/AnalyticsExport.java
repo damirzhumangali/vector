@@ -432,7 +432,7 @@ final class AnalyticsExport {
         if ("kind".equals(key)) return switch (value.toString()) {
             case "before" -> "До";
             case "after" -> "После";
-            case "dispatcher" -> "Диспетчер";
+            case "dispatcher" -> "Материал руководителя";
             default -> value;
         };
         if ("status".equals(key)) return switch (value.toString()) {

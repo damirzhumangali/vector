@@ -190,7 +190,9 @@ public final class DispatcherReviewCheck {
         check("done".equals(state(db, original).get("status")), "Repeat preserves accepted original");
         expectFailure(409, () -> Tasks.repeatTask(db, dispatcher, original, Map.of()));
         long managerRepeat = task(db, "done");
-        expectFailure(403, () -> Tasks.repeatTask(db, manager, managerRepeat, Map.of()));
+        expectFailure(403, () -> Tasks.repeatTask(db, employee, managerRepeat, Map.of("reason", "Новый выезд")));
+        var linked = Tasks.repeatTask(db, manager, managerRepeat, Map.of("reason", "Новый выезд"));
+        check(linked.containsKey("task"), "Manager can create linked repeat");
         expectFailure(409, () -> Tasks.updateTask(db, manager, original,
             Map.of("status", "reopened", "reopenReason", "Duplicate visit")));
     }
@@ -230,7 +232,6 @@ public final class DispatcherReviewCheck {
         Tasks.updateTask(db, dispatcher, closed, Map.of("status", "done"));
         var reopen = Map.<String, Object>of("status", "reopened", "reopenReason", "Новая проверка", "expectedRevision", 2);
         expectFailure(403, () -> Tasks.updateTask(db, employee, closed, reopen));
-        expectFailure(403, () -> Tasks.updateTask(db, dispatcher, closed, reopen));
         expectFailure(404, () -> Tasks.updateTask(db, outsider, closed, reopen));
         expectFailure(400, () -> Tasks.updateTask(db, manager, closed, Map.of("status", "reopened", "reopenReason", " ")));
         Tasks.updateTask(db, manager, closed, reopen);
@@ -251,6 +252,12 @@ public final class DispatcherReviewCheck {
         Tasks.updateTask(db, owner, cancelled, reopen);
         check("unassigned".equals(state(db, cancelled).get("status")), "Owner reopens cancelled work without assignment");
         assertEvent(db, cancelled, "reopened", owner, "Новая проверка");
+
+        long legacyClosed = task(db, "done");
+        Tasks.updateTask(db, dispatcher, legacyClosed,
+            Map.of("status", "reopened", "reopenReason", "Новая проверка", "expectedRevision", 1));
+        check("rework".equals(state(db, legacyClosed).get("status")), "Legacy dispatcher can reopen accepted work");
+        assertEvent(db, legacyClosed, "reopened", dispatcher, "Новая проверка");
     }
 
     public static void main(String[] args) throws Exception {

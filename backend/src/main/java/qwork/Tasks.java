@@ -57,7 +57,7 @@ final class Tasks {
 
     static long insertTask(Connection db, Map<String, Object> user, Map<String, Object> payload,
                            boolean fromImport) throws Exception {
-        Accounts.requireDispatcher(user);
+        Accounts.requireManager(user);
         String title = field(payload, "title", "Название", 160, false);
         var place = Places.resolve(db, user, payload);
         String description = field(payload, "description", "Описание", 2000, true);
@@ -90,7 +90,7 @@ final class Tasks {
 
     static Map<String, Object> repeatTask(Connection db, Map<String, Object> user, long id,
                                           Map<String, Object> payload) throws Exception {
-        Accounts.requireDispatcher(user);
+        Accounts.requireManager(user);
         var original = getTask(db, user, id);
         var assignment = new LinkedHashMap<String, Object>();
         assignment.put("assigneeId", payload.getOrDefault("assigneeId", original.get("assignee_id").toString()));
@@ -149,11 +149,11 @@ final class Tasks {
         String role = (String) user.get("role");
         boolean employee = role.equals("employee");
         if (!employee) {
-            Accounts.requireReviewer(user);
+            Accounts.requireManager(user);
         }
         String oldStatus = (String) task.get("status");
         if (payload.containsKey("managerId")) {
-            Accounts.requireDispatcher(user);
+            Accounts.requireManager(user);
             if (CLOSED.contains(oldStatus) || payload.containsKey("status")) {
                 throw error(409, "Назначьте руководителя в открытой заявке отдельным действием.");
             }
@@ -246,11 +246,7 @@ final class Tasks {
 
     private static Map<String, Object> reopen(Connection db, Map<String, Object> user, long id,
                                               Map<String, Object> task, Map<String, Object> payload) throws Exception {
-        boolean owner = "dispatcher".equals(user.get("role"))
-            && user.get("is_owner") instanceof Number value && value.longValue() != 0;
-        if (!"manager".equals(user.get("role")) && !owner) {
-            throw error(403, "Переоткрыть заявку может руководитель или владелец компании.");
-        }
+        Accounts.requireManager(user);
         String oldStatus = (String) task.get("status");
         if (!Set.of("done", "cancelled").contains(oldStatus)) {
             throw error(409, "Можно переоткрыть принятую или отменённую заявку.");

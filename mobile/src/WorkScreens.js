@@ -346,7 +346,7 @@ export function WorkScreens({ task, setTask, onBack, onOpenTask, onLocate, onUpl
 
         {onUploadPhoto ? (
           <View style={styles.card}>
-            <SectionHeading icon="briefcase">Материалы диспетчера</SectionHeading>
+            <SectionHeading icon="briefcase">Материалы руководителя</SectionHeading>
             <TaskPhotoGallery taskId={task.id} request={request} imageSource={imageSource}
               kinds={['material']} revision={galleryRevision} />
           </View>
@@ -498,7 +498,7 @@ export function WorkScreens({ task, setTask, onBack, onOpenTask, onLocate, onUpl
           <View style={styles.card}>
             <SectionHeading icon="check">{status === 'review' ? 'Отчёт отправлен' : 'Работа принята'}</SectionHeading>
             <Text style={styles.body}>
-              {status === 'review' ? 'Диспетчер проверит отчёт и примет работу или вернёт её на доработку.' : 'Результат проверен и принят.'}
+              {status === 'review' ? 'Руководитель проверит отчёт и примет работу или вернёт её на доработку.' : 'Результат проверен и принят.'}
             </Text>
           </View>
         ) : null}

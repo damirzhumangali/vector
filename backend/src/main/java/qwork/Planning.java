@@ -73,7 +73,7 @@ final class Planning {
     private Planning() {}
 
     static Map<String, Object> list(Connection db, Map<String, Object> user) throws SQLException {
-        Accounts.requireDispatcher(user);
+        Accounts.requireManager(user);
         var plans = Db.rows(db, "SELECT * FROM work_plans WHERE company_id = ? ORDER BY id DESC",
             number(user, "company_id"));
         return Map.of("templates", plans.stream().map(Planning::json).toList());
@@ -81,7 +81,7 @@ final class Planning {
 
     static Map<String, Object> validate(Connection db, Map<String, Object> user, Map<String, Object> body)
             throws SQLException {
-        Accounts.requireDispatcher(user);
+        Accounts.requireManager(user);
         if (!(body.get("objectId") instanceof String)) {
             throw error(400, "Выберите объект из справочника.");
         }
@@ -132,7 +132,7 @@ final class Planning {
 
     static Map<String, Object> save(Connection db, Map<String, Object> user, Long id, Map<String, Object> body)
             throws SQLException {
-        Accounts.requireDispatcher(user);
+        Accounts.requireManager(user);
         long company = number(user, "company_id");
         lockCompany(db, company);
         Instant now = Instant.now();
@@ -176,7 +176,7 @@ final class Planning {
     }
 
     static Map<String, Object> generate(Connection db, Map<String, Object> user) throws SQLException {
-        Accounts.requireDispatcher(user);
+        Accounts.requireManager(user);
         return Map.of("generated", generateCompany(db, number(user, "company_id"), Instant.now()));
     }
 

@@ -8,8 +8,9 @@ import { KURMANGAZY_DESTINATIONS, TRIP_CITIES } from './TripDestinations';
 import DispatcherTripOffer from './DispatcherTripOffer';
 import { TripOfferCard, TripOfferHistory } from './TripOfferCard';
 import FieldVisitsOverview, { TripOfferPreview } from './FieldVisitsOverview';
-import { TripRouteSummary } from './TripRoute';
+import { tripRouteTitle, TripRouteEditor, TripRouteSummary, validTripRoute } from './TripRoute';
 import { TripActualExpenses } from './TripActualExpenses';
+import { TripApprovalProgress, TripApprovalReview, TripApprovalSettings } from './TripApprovals';
 import TripImport from './TripImport';
 
 export const TASK_STATUS = {
@@ -118,7 +119,7 @@ function useAction() {
       setBusy(false);
     }
   }
-  return { busy, error, run };
+  return { busy, error, run, clearError: () => setError('') };
 }
 
 function Button({ children, selected = false, disabled = false, onPress }) {
@@ -353,34 +354,103 @@ export function VisitOptionPicker({ label, icon, options, selected, onSelect, di
   </View>;
 }
 
-function TripForm({ request, employees, objects, onCreated, onCancel, offline = false, serverUnavailable = false,
-  supportsRoutes = false }) {
-  const [employeeId, setEmployeeId] = useState(null);
+const MAX_TRIP_ORGANIZATIONS = 30;
+
+function organizationKey(name) {
+  return name.normalize('NFC').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function TripForm({ request, objects = [], onCreated, onCancel, offline = false,
+  companyOrganizations = [], onAddOrganization,
+  loadingCapabilities = false, capabilitiesError = '', approvalSettings = null, approvalSettingsError = '' }) {
   const [objectId, setObjectId] = useState(null);
   const [placeSource, setPlaceSource] = useState('organizations');
   const [organizations, setOrganizations] = useState([]);
+  const [addingOrganization, setAddingOrganization] = useState(false);
+  const [newOrganization, setNewOrganization] = useState('');
   const [city, setCity] = useState('');
   const [destination, setDestination] = useState('');
   const [purpose, setPurpose] = useState('');
   const [comment, setComment] = useState('');
+  const [start, setStart] = useState(null);
+  const [end, setEnd] = useState(null);
+  const [budgetDraft, setBudgetDraft] = useState(() => tripBudgetDraft(null));
+  const [visitSchedule, setVisitSchedule] = useState([]);
   const submission = useRef(null);
   const action = useAction();
-  const selectedObject = objects.find(object => String(object.id) === objectId);
-  const multiRoute = organizations.length > 1;
-  let place;
-  if (placeSource === 'directory' && selectedObject) place = { objectId };
-  if (placeSource === 'manual' && destination.trim()) place = { destination: destination.trim() };
-  if (placeSource === 'city' && city.trim()) place = { destination: city.trim() };
-  if (placeSource === 'organizations' && organizations.length) {
-    if (!multiRoute) place = { destination: organizations[0] };
-    else if (supportsRoutes) place = { destinations: organizations };
+  const catalogAction = useAction();
+  const busy = action.busy || catalogAction.busy;
+  const blocked = offline || loadingCapabilities || Boolean(capabilitiesError);
+  const catalog = new Map(KURMANGAZY_DESTINATIONS.map(option => [organizationKey(option.label), option]));
+  for (const { name } of companyOrganizations) {
+    const key = organizationKey(name);
+    if (!catalog.has(key)) catalog.set(key, { id: name, label: name });
   }
-  const selectedEmployee = employees.find(person => String(person.id) === employeeId);
-  const ready = !offline && !serverUnavailable && Boolean(selectedEmployee && place && purpose.trim());
+  const organizationOptions = [...catalog.values()];
+  const atLimit = organizations.length >= MAX_TRIP_ORGANIZATIONS;
+  const canAddOrganization = Boolean(onAddOrganization && !blocked && !busy && !atLimit);
+  const selectedObject = objects.find(object => String(object.id) === objectId);
+  const cityName = city.trim();
+  const manualName = destination.trim();
+  let visitNames = [];
+  if (placeSource === 'organizations') visitNames = organizations;
+  if (placeSource === 'manual' && manualName) visitNames = [manualName];
+  const withCity = name => cityName ? `${cityName} · ${name}` : name;
+  const routeStops = placeSource === 'directory' && selectedObject
+    ? [{ id: `object:${objectId}`, destination: withCity(selectedObject.name) }]
+    : visitNames.map(name => ({ id: `${placeSource}:${name}`, destination: withCity(name) }));
+  const placeTooLong = routeStops.some(stop => Array.from(stop.destination).length > 300);
+  const routeNames = new Map(routeStops.map(stop => [stop.id, stop.destination]));
+  const route = visitSchedule.filter(stop => routeNames.has(stop.id));
+  for (const stop of routeStops) {
+    if (!route.some(item => item.id === stop.id)) route.push({ id: stop.id, plannedAt: null });
+  }
+  let place;
+  if (placeSource === 'directory' && selectedObject) {
+    place = { objectId, scheduleVisit: true, ...(cityName ? { city: cityName } : {}) };
+  } else if (route.length) {
+    place = { destinations: route.map(stop => routeNames.get(stop.id)) };
+  } else if (placeSource === 'organizations' && cityName) {
+    place = { destination: cityName };
+  }
+  const plannedStart = deadlineToIso(start);
+  const plannedEnd = deadlineToIso(end);
+  const validPeriod = plannedStart && plannedEnd && end > start;
+  const budget = tripBudgetPayload(budgetDraft);
+  const approvedRoute = approvalSettings?.configured === true && !approvalSettingsError;
+  const ready = !blocked && !busy && !placeTooLong && !(placeSource === 'organizations' && addingOrganization)
+    && Boolean(place && purpose.trim() && approvedRoute && validPeriod && budget?.dailyRate != null
+      && validTripRoute(route, routeStops, plannedStart, plannedEnd));
+
+  function closeOrganizationEditor() {
+    setAddingOrganization(false);
+    setNewOrganization('');
+    catalogAction.clearError();
+  }
+
+  function addOrganization() {
+    const name = newOrganization.trim();
+    if (!canAddOrganization || !name) return;
+    function selectOrganization(selectedName) {
+      setOrganizations(previous => previous.includes(selectedName) ? previous : [...previous, selectedName]);
+      closeOrganizationEditor();
+    }
+    const existing = catalog.get(organizationKey(name));
+    if (existing) {
+      selectOrganization(existing.id);
+      return;
+    }
+    void catalogAction.run(async () => {
+      const savedName = await onAddOrganization(name);
+      selectOrganization(catalog.get(organizationKey(savedName))?.id ?? savedName);
+    });
+  }
+
   function save() {
     if (!ready) return;
     void action.run(async () => {
-      const body = { employeeId, ...place, purpose: purpose.trim(), comment: comment.trim() };
+      const body = { ...place, purpose: purpose.trim(), comment: comment.trim(), plannedStart, plannedEnd, ...budget,
+        ...(route.length ? { visitTimes: route.map(stop => stop.plannedAt) } : {}) };
       const draft = JSON.stringify(body);
       if (submission.current?.draft !== draft) submission.current = { draft, requestId: randomUUID() };
       const { offer } = await request('/trip-offers', {
@@ -391,68 +461,97 @@ function TripForm({ request, employees, objects, onCreated, onCancel, offline = 
   }
   return (
     <View style={styles.screen}>
-      <View style={styles.choices}><Button disabled={action.busy} onPress={onCancel}>‹ К выездам</Button></View>
+      <View style={styles.choices}><Button disabled={busy} onPress={onCancel}>‹ К выездам</Button></View>
       <Card title="Новая командировка" icon="pin">
-        <Text style={styles.muted}>{placeSource === 'organizations' && supportsRoutes
-          ? 'Укажите организации и сотрудника. Он предложит порядок посещения, даты и ставку.'
-          : 'Укажите место и сотрудника. Сотрудник предложит даты и ставку за день.'}</Text>
-        <Text style={styles.label}>Место назначения</Text>
+        <Field label="Город" value={city} onChange={setCity} limit={300}
+          disabled={busy} placeholder="Введите название города" />
         <View style={styles.choices}>
-          <Button selected={placeSource === 'organizations'} disabled={action.busy}
-            onPress={() => setPlaceSource('organizations')}>Организации</Button>
-          <Button selected={placeSource === 'city'} disabled={action.busy}
-            onPress={() => setPlaceSource('city')}>Город</Button>
+          {TRIP_CITIES.map(item => <Button key={item.id} selected={cityName === item.id} disabled={busy}
+            onPress={() => setCity(item.id)}>{item.label}</Button>)}
         </View>
+        <Text style={styles.muted}>Можно указать только город или добавить организации и объекты ниже.</Text>
+        <Text style={styles.label}>Организации и объекты</Text>
         {placeSource === 'organizations' && <>
-          <VisitOptionPicker label={supportsRoutes ? 'Выбрать организации' : 'Выбрать организацию'} icon="building"
-            options={KURMANGAZY_DESTINATIONS} selected={supportsRoutes ? organizations : organizations[0]}
-            onSelect={value => setOrganizations(supportsRoutes ? value : [value])}
-            disabled={action.busy} visibleLimit={KURMANGAZY_DESTINATIONS.length} />
-          <Text style={styles.muted}>{KURMANGAZY_DESTINATIONS.length} организаций</Text>
-          {supportsRoutes && organizations.length > 0 && <View style={styles.inset}>
+          <VisitOptionPicker label="Выбрать организации" icon="building"
+            options={organizationOptions} selected={organizations}
+            onSelect={value => { if (value.length <= MAX_TRIP_ORGANIZATIONS) setOrganizations(value); }}
+            disabled={busy} visibleLimit={50} />
+          <Text style={styles.muted}>{organizationOptions.length} организаций</Text>
+          {onAddOrganization && (addingOrganization ? <View style={styles.inset}>
+            <Field label="Название организации" value={newOrganization} onChange={setNewOrganization} limit={300}
+              disabled={busy} placeholder="Введите полное название" />
+            <Notice message={catalogAction.error} />
+            <View style={styles.choices}>
+              <Button selected disabled={!canAddOrganization || !newOrganization.trim()} onPress={addOrganization}>
+                {catalogAction.busy ? 'Сохраняем…' : 'Сохранить организацию'}
+              </Button>
+              <Button disabled={busy} onPress={closeOrganizationEditor}>Отмена</Button>
+            </View>
+          </View> : <View style={styles.choices}>
+            <Button disabled={!canAddOrganization} onPress={() => setAddingOrganization(true)}>Добавить организацию</Button>
+          </View>)}
+          {organizations.length > 0 && <View style={styles.inset}>
             <Text style={styles.label}>Организации в поездке</Text>
             {organizations.map(organization => <Text key={organization} style={styles.body}>
               {KURMANGAZY_DESTINATIONS.find(place => place.id === organization)?.shortLabel ?? organization}
             </Text>)}
           </View>}
-          {!supportsRoutes && multiRoute && <Text style={styles.warning}>Для отправки маршрута нужно обновить сервер qwork.</Text>}
-        </>}
-        {placeSource === 'city' && <>
-          <Field label="Название города" value={city} onChange={setCity} limit={300}
-            disabled={action.busy} placeholder="Введите название города" />
-          <View style={styles.choices}>
-            {TRIP_CITIES.map(item => <Button key={item.id} selected={city.trim() === item.id} disabled={action.busy}
-              onPress={() => setCity(item.id)}>{item.label}</Button>)}
-          </View>
+          {atLimit && <Text style={styles.warning}>
+            В маршруте максимум {MAX_TRIP_ORGANIZATIONS} организаций. Уберите одну, чтобы добавить другую.
+          </Text>}
         </>}
         {placeSource === 'directory' && <VisitOptionPicker label="Выбрать объект" icon="building" selected={objectId} onSelect={setObjectId}
-          disabled={action.busy} empty="В справочнике пока нет объектов."
+          disabled={busy} empty="В справочнике пока нет объектов."
           options={objects.map(object => ({ id: String(object.id), label: object.name, detail: object.address }))} />}
         {placeSource === 'manual' && <Field label="Объект или адрес" value={destination} onChange={setDestination} limit={300}
-          disabled={action.busy} placeholder="Укажите место поездки" />}
+          disabled={busy} placeholder="Укажите место поездки" />}
         <View style={styles.choices}>
-          {placeSource !== 'directory' && objects.length > 0 && <Button disabled={action.busy}
+          {placeSource !== 'organizations' && <Button disabled={busy}
+            onPress={() => setPlaceSource('organizations')}>Список организаций</Button>}
+          {placeSource !== 'directory' && objects.length > 0 && <Button disabled={busy}
             onPress={() => setPlaceSource('directory')}>Из справочника</Button>}
-          {placeSource !== 'manual' && <Button disabled={action.busy}
+          {placeSource !== 'manual' && <Button disabled={busy}
             onPress={() => setPlaceSource('manual')}>Другой объект или адрес</Button>}
         </View>
-        <VisitOptionPicker label="Назначить сотрудника" icon="user" selected={employeeId}
-          disabled={action.busy} empty="В команде пока нет сотрудников."
-          options={employees.map(person => ({ id: String(person.id), label: person.name, detail: person.department }))}
-          onSelect={setEmployeeId} />
-        {!employees.length && <Text style={styles.muted}>Сначала добавьте сотрудника в команду.</Text>}
+        {placeTooLong && <Text style={styles.warning}>Город и название объекта вместе должны быть не длиннее 300 символов.</Text>}
       </Card>
       <Card title="Задание поездки" icon="clipboard">
-        <Field label="Что нужно сделать" value={purpose} onChange={setPurpose} limit={1000} disabled={action.busy}
+        <Field label="Что нужно сделать" value={purpose} onChange={setPurpose} limit={1000} disabled={busy}
           placeholder="Например, проверить и настроить оборудование" multiline />
         <Field label="Комментарий · необязательно" value={comment} onChange={setComment} limit={1000}
-          disabled={action.busy} placeholder="Контакты на месте или важные детали" multiline />
+          disabled={busy} placeholder="Контакты на месте или важные детали" multiline />
+      </Card>
+      <Card title="Период командировки" icon="calendar">
+        <DeadlinePicker label="Начало поездки" value={start} onChange={setStart} required showQuick={false}
+          showHelper={false} disabled={busy} />
+        <DeadlinePicker label="Окончание поездки" value={end} onChange={setEnd} required showQuick={false}
+          showHelper={false} suggestedDate={start ?? undefined} minimumDate={start ?? undefined} disabled={busy} />
+        {plannedStart && plannedEnd && !validPeriod && <Text style={styles.warning}>Окончание должно быть позже начала.</Text>}
+      </Card>
+      <TripRouteEditor stops={routeStops} value={route} onChange={setVisitSchedule}
+        start={plannedStart} end={plannedEnd} disabled={busy} />
+      <Card title="Ставка и расходы" icon="briefcase">
+        <Text style={styles.muted}>Укажите ставку в тенге за день. Если оплата по ставке не нужна, введите 0.</Text>
+        <TripBudgetFields value={budgetDraft} onChange={setBudgetDraft} start={plannedStart} end={plannedEnd}
+          disabled={busy} collapseExpenses />
+      </Card>
+      <Card title="Маршрут согласования" icon="check">
+        {approvedRoute && <Text style={styles.muted}>Заявка пройдёт эти этапы по очереди.</Text>}
+        {approvalSettings?.stages?.map(stage => <View key={stage.position} style={styles.inset}>
+          <Text style={styles.label}>{stage.position}. {stage.title}</Text>
+          <Text style={styles.body}>{stage.approverName || 'Согласующий не назначен'}</Text>
+        </View>)}
+        <Notice message={approvalSettingsError} />
+        {!approvalSettings && !approvalSettingsError && !offline && <Text style={styles.muted}>Загружаем маршрут согласования…</Text>}
+        {approvalSettings && !approvalSettings.configured && <Text style={styles.warning}>
+          Руководителю нужно настроить согласование, прежде чем вы сможете отправить командировку.
+        </Text>}
       </Card>
       {offline && <Text style={styles.warning}>Подключитесь к интернету, чтобы отправить командировку.</Text>}
-      {serverUnavailable && <Text style={styles.warning}>Для отправки командировки нужно обновить сервер qwork.</Text>}
-      <Notice message={action.error} />
-      <Button selected disabled={!ready || action.busy} onPress={save}>
-        {action.busy ? 'Отправляем…' : 'Отправить сотруднику'}
+      {loadingCapabilities && <Text style={styles.muted}>Проверяем возможности сервера…</Text>}
+      <Notice message={action.error || capabilitiesError} />
+      <Button selected disabled={!ready} onPress={save}>
+        {action.busy ? 'Отправляем…' : 'Отправить на согласование'}
       </Button>
     </View>
   );
@@ -562,7 +661,7 @@ function TripStatus({ status, isRequest }) {
 
 export function EmployeeTripInbox({ request, offline, onOpen }) {
   const { value } = useResource(request, '/trip-offers', offline);
-  const incoming = (value?.offers ?? []).filter(offer => offer.status === 'awaiting_employee');
+  const incoming = (value?.offers ?? []).filter(offer => !offer.selfRequested && offer.status === 'awaiting_employee');
   if (!incoming.length) return null;
   return <Card title={incoming.length === 1 ? 'Новая командировка' : `Новые командировки · ${incoming.length}`} icon="briefcase">
     <TripOfferPreview offer={incoming[0]} onOpen={() => onOpen(incoming[0].id)} />
@@ -583,12 +682,12 @@ function TripReport({ id, request, offline, employee, canEditBudget, onTask, onB
   const active = trip?.status === 'active';
   const stopsRemaining = stops.filter(stop => !stop.visitedAt && !stop.skippedAt).length;
   const busy = action.busy || stopAction.busy || expenseAction.busy;
-  const canEditCalculation = employee ? !trip?.offerId : canEditBudget;
+  const canEditCalculation = !trip?.selfRequested && (employee ? !trip?.offerId : canEditBudget);
   const available = trip ? eligibleTripTasks(tasks, trip.employeeId) : [];
   const canAttach = !employee && trip?.status !== 'finished' && (available.length > 0 || editingTasks);
   const ownBudget = employee ? trip?.estimate : trip?.budget;
   const budgetPayload = budgetDraft ? tripBudgetPayload(budgetDraft) : null;
-  const budgetTitle = employee ? 'Мой расчёт' : 'План диспетчера';
+  const budgetTitle = employee ? 'Мой расчёт' : 'План руководителя';
   function mark(phase) {
     void action.run(async () => {
       await request(`/trips/${encodeURIComponent(id)}/${phase}`, { method: 'POST', body: {} });
@@ -634,7 +733,7 @@ function TripReport({ id, request, offline, employee, canEditBudget, onTask, onB
       <Notice message={report.error || (!budgetDraft && action.error)} />
       {offline && <Text style={styles.warning}>Для обновления отчёта и отметок нужна связь.</Text>}
       {trip ? <>
-        <Card title={stops.length ? `Маршрут · ${stops.length} организаций` : trip.destination} icon="briefcase">
+        <Card title={tripRouteTitle(stops) ?? trip.destination} icon="briefcase">
           <TripStatus status={trip.status} />
           <Text style={styles.muted}>{trip.employeeName}</Text>
           {trip.address && trip.address !== trip.destination ? <Text style={styles.body}>{trip.address}</Text> : null}
@@ -642,7 +741,7 @@ function TripReport({ id, request, offline, employee, canEditBudget, onTask, onB
           <Text style={styles.label}>Что нужно сделать</Text>
           <Text style={styles.body}>{trip.purpose}</Text>
           {trip.comment ? <>
-            <Text style={styles.label}>Комментарий диспетчера</Text>
+            <Text style={styles.label}>{trip.selfRequested ? 'Комментарий сотрудника' : 'Комментарий руководителя'}</Text>
             <Text style={styles.body}>{trip.comment}</Text>
           </> : null}
           <Text style={styles.body}>План · {tripPlanLabel(trip)}</Text>
@@ -664,7 +763,7 @@ function TripReport({ id, request, offline, employee, canEditBudget, onTask, onB
           onMark={employee && active ? recordStop : undefined} busy={busy} error={stopAction.error} />}
         <Card title="Расходы на поездку" icon="clipboard">
           <Text style={styles.muted}>Ставка считается за календарные дни по времени Алматы. Проезд, жильё, питание и прочее указываются за всю поездку.</Text>
-          {trip.budget ? <TripBudgetSummary title="План диспетчера" value={trip.budget} /> : null}
+          {trip.budget ? <TripBudgetSummary title="План руководителя" value={trip.budget} /> : null}
           {trip.estimate ? <TripBudgetSummary title={trip.offerId ? 'Согласованная оплата'
             : employee ? 'Мой расчёт' : 'Расчёт сотрудника'} value={trip.estimate} /> : null}
           {!trip.budget && !trip.estimate && <Text style={styles.muted}>Расходы пока не указаны.</Text>}
@@ -700,20 +799,25 @@ function TripReport({ id, request, offline, employee, canEditBudget, onTask, onB
             Привязать существующую заявку · необязательно
           </Button>)}
         </Card>}
-        <TripOfferHistory history={offer?.history} />
+        {offer?.selfRequested ? <TripApprovalProgress stages={offer.approvalStages} />
+          : <TripOfferHistory history={offer?.history} />}
       </> : !offline && !report.error ? <Text style={styles.muted}>Загружаем отчёт…</Text> : null}
     </>
   );
 }
 
-function TripsPanel({ request, employee = false, employees = [], objects = [], tasks = [], offline = false, onTask,
-  id, setId, onChange, initialOfferId = null, initialRequestId = null, canEditBudget = false, canDispatch = false,
+function TripsPanel({ request, employee = false, tasks = [], offline = false, onTask,
+  id, setId, initialOfferId = null, initialRequestId = null, canEditBudget = false, canDispatch = false,
   filter, onFilter, onControl, onCreateTask, sampleStaff }) {
   const list = useResource(request, '/trips', offline);
   const requests = useResource(request, '/trip-requests', offline);
   const offers = useResource(request, '/trip-offers', offline);
   const [creating, setCreating] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [configuring, setConfiguring] = useState(false);
+  const selfService = offers.value?.supportsTripSelfService === true;
+  const approval = useResource(request, '/trip-approval-settings', offline || !selfService || (!employee && !configuring));
+  const destinations = useResource(request, '/trip-destinations', offline || !employee || !creating);
   const [offerId, setOfferId] = useState(initialOfferId);
   const [recentOffer, setRecentOffer] = useState(null);
   const [requestId, setRequestId] = useState(initialRequestId);
@@ -726,17 +830,33 @@ function TripsPanel({ request, employee = false, employees = [], objects = [], t
   const requestsUnavailable = requests.errorStatus === 404;
   const offersUnavailable = offers.errorStatus === 404;
   const offerError = offersUnavailable ? 'Назначения станут доступны после обновления сервера.' : offers.error;
+  const canCreateTrip = Boolean(employee && request && !offline && selfService);
+  const tripCreateHint = !employee || canCreateTrip ? '' : offline ? 'Для создания командировки нужен интернет.'
+    : !request ? 'Войдите в компанию, чтобы создать командировку.'
+      : offersUnavailable || offers.value ? 'Создание командировок станет доступно после обновления сервера.'
+        : offers.error ? 'Не удалось проверить доступность командировок. Попробуйте открыть раздел снова.'
+          : 'Проверяем доступность командировок…';
   const fetchedOffers = offers.value?.offers ?? [];
   const fetchedRevision = fetchedOffers.find(item => item.id === recentOffer?.id)?.revision ?? 0;
   const allOffers = recentOffer && recentOffer.revision > fetchedRevision
     ? [recentOffer, ...fetchedOffers.filter(item => item.id !== recentOffer.id)] : fetchedOffers;
   const chosenOffer = allOffers.find(item => item.id === offerId);
   async function refresh() {
-    await Promise.all([list.reload(), requests.reload(), offers.reload(), onChange?.()]);
+    await Promise.all([list.reload(), requests.reload(), offers.reload()]);
   }
   function changeOffer(offer) {
     setRecentOffer(offer);
     void refresh();
+  }
+  async function addOrganization(name) {
+    const { organization } = await request('/trip-organizations', { method: 'POST', body: { name } });
+    const key = organizationKey(organization.name);
+    offers.applyUpdate(current => {
+      const existing = current.organizations ?? [];
+      return existing.some(item => organizationKey(item.name) === key)
+        ? current : { ...current, organizations: [...existing, organization] };
+    });
+    return organization.name;
   }
   function openConfirmedTrip(next) {
     setOfferId(null);
@@ -747,12 +867,15 @@ function TripsPanel({ request, employee = false, employees = [], objects = [], t
     onBack={() => setId(null)} onChange={refresh} tasks={tasks}
     offer={allOffers.find(offer => offer.tripId && String(offer.tripId) === String(id))} />;
   if (offerId) {
-    const Details = employee ? TripOfferCard : DispatcherTripOffer;
+    const selfDraft = chosenOffer?.selfRequested && chosenOffer.status === 'awaiting_employee';
+    const Details = chosenOffer?.selfRequested && !selfDraft ? TripApprovalReview
+      : employee ? TripOfferCard : DispatcherTripOffer;
     return chosenOffer ? <Details key={offerId} offer={chosenOffer} employee={employee} request={request}
       offline={offline} canDispatch={canDispatch} onChanged={changeOffer} onTrip={openConfirmedTrip}
-      onBack={() => setOfferId(null)} /> : <Card title="Назначение на командировку" icon="briefcase">
-      <Notice message={offerError || (offers.value && 'Назначение не найдено.')} />
-      {!offers.value && !offerError && <Text style={styles.muted}>{offline ? 'Для просмотра нужна связь.' : 'Загружаем назначение…'}</Text>}
+      approvalSettings={approval.value} approvalSettingsError={approval.error}
+      onBack={() => setOfferId(null)} /> : <Card title="Командировка" icon="briefcase">
+      <Notice message={offerError || (offers.value && 'Командировка не найдена.')} />
+      {!offers.value && !offerError && <Text style={styles.muted}>{offline ? 'Для просмотра нужна связь.' : 'Загружаем командировку…'}</Text>}
       <Button onPress={() => setOfferId(null)}>К выездам</Button>
     </Card>;
   }
@@ -768,17 +891,24 @@ function TripsPanel({ request, employee = false, employees = [], objects = [], t
     {!requests.value && !requests.error && <Text style={styles.muted}>{offline ? 'Для просмотра нужна связь.' : 'Загружаем запрос…'}</Text>}
     <Button onPress={() => setRequestId(null)}>К выездам</Button>
   </Card>;
-  if (creating && canDispatch) return <TripForm request={request} employees={employees} objects={objects} offline={offline}
-    serverUnavailable={offersUnavailable} supportsRoutes={offers.value?.supportsTripRoutes === true}
+  if (creating && employee) return <TripForm request={request} objects={destinations.value?.objects ?? []} offline={offline}
+    approvalSettings={approval.value} approvalSettingsError={approval.error}
+    companyOrganizations={offers.value?.organizations}
+    onAddOrganization={offers.value?.supportsTripOrganizations === true ? addOrganization : undefined}
+    loadingCapabilities={Boolean(request && !offline && !offers.value && !offers.error)}
+    capabilitiesError={!offers.value && !offersUnavailable ? offers.error : ''}
     onCancel={() => setCreating(false)} onCreated={(next, offer) => {
       setCreating(false);
       setOfferId(next);
       changeOffer(offer);
     }} />;
-  if (importing && canDispatch) return <View style={styles.screen}>
+  if (importing && employee) return <View style={styles.screen}>
     <View style={styles.choices}><Button onPress={() => setImporting(false)}>‹ К командировкам</Button></View>
     <TripImport request={request} offline={offline} onImported={offers.reload} />
   </View>;
+  if (configuring && !employee) return <TripApprovalSettings settings={approval.value} loadError={approval.error}
+    offline={offline} request={request} onSaved={result => approval.applyUpdate(() => result)}
+    onBack={() => setConfiguring(false)} OptionPicker={VisitOptionPicker} />;
   return <View style={styles.screen}>
     {offline && <Text style={styles.warning}>Офлайн · показываем доступные выезды. Для обновления нужна связь.</Text>}
     <Notice message={list.error || offerError || (requestsUnavailable ? '' : requests.error)} />
@@ -786,11 +916,14 @@ function TripsPanel({ request, employee = false, employees = [], objects = [], t
       taskStatuses={TASK_STATUS} employee={employee} canDispatch={canDispatch} filter={filter} onFilter={onFilter}
       loading={Boolean(request && !offline && filter !== 'assignments' && !list.value && !list.error)}
       onTask={onTask && (taskId => onTask(taskId, { view: filter }))} onTrip={setId} onOffer={setOfferId} onRequest={setRequestId}
-      onCreateTask={onCreateTask} onCreateTrip={canDispatch ? () => setCreating(true) : undefined}
-      onImportTrip={canDispatch && offers.value?.supportsTripImport === true ? () => {
+      onCreateTask={onCreateTask} onCreateTrip={employee ? () => setCreating(true) : undefined}
+      createTripDisabled={!canCreateTrip} tripCreateHint={tripCreateHint}
+      onImportTrip={employee && selfService && offers.value?.supportsTripImport === true ? () => {
         onFilter('trips');
         setImporting(true);
-      } : undefined} onControl={onControl} />
+      } : undefined} importTripDisabled={offline}
+      onSetupApproval={!employee && selfService ? () => setConfiguring(true) : undefined}
+      onControl={onControl} />
     {!employee && sampleStaff && <Card title="Тестовая команда" icon="users">
       <Text style={styles.muted}>{sampleStaff.names.join(' · ')}</Text>
       <Button disabled={offline || sampleStaff.busy} onPress={sampleStaff.onAdd}>
@@ -809,13 +942,12 @@ export function EmployeeTrips({ request, offline = false, onTask, tasks = [], in
     tasks={tasks} filter={filter} onFilter={setFilter} initialOfferId={initialOfferId} initialRequestId={initialRequestId} />;
 }
 
-export function OfficeFieldOperations({ request, tasks = [], employees = [], objects = [], role = 'dispatcher',
+export function OfficeFieldOperations({ request, tasks = [],
   onTask, onCreateTask, initialTab = 'all', initialTripId = null, onTabChange, sampleStaff }) {
   const [filter, setFilter] = useState(initialTab === 'board' ? 'all' : initialTab);
   const [control, setControl] = useState(initialTab === 'board' && !initialTripId);
   const [id, setId] = useState(initialTripId);
-  const roster = employees.filter(person => person.role === 'employee');
-  const board = useResource(request, '/field-control', !control && roster.length > 0);
+  const board = useResource(request, '/field-control', !control);
   function selectFilter(next) {
     setFilter(next);
     setControl(false);
@@ -830,8 +962,7 @@ export function OfficeFieldOperations({ request, tasks = [], employees = [], obj
       : !board.error ? <Text style={styles.muted}>Загружаем выездные работы…</Text> : null}
   </View>;
 
-  return <TripsPanel request={request} objects={objects} employees={roster.length ? roster : board.value?.employees}
-    tasks={tasks} id={id} setId={setId} onTask={onTask} onChange={board.reload} canEditBudget canDispatch={role === 'dispatcher'}
+  return <TripsPanel request={request} tasks={tasks} id={id} setId={setId} onTask={onTask} canEditBudget canDispatch
     filter={filter} onFilter={selectFilter} sampleStaff={sampleStaff} onCreateTask={onCreateTask}
     onControl={() => { setControl(true); onTabChange?.('board'); }} />;
 }

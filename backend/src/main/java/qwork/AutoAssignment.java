@@ -72,7 +72,7 @@ final class AutoAssignment {
 
     static Map<String, Object> settings(Connection db, Map<String, Object> user, Map<String, Object> body)
             throws SQLException {
-        Accounts.requireDispatcher(user);
+        Accounts.requireManager(user);
         long company = number(user, "company_id");
         if (body == null) {
             return readSettings(db, company).json();
@@ -93,7 +93,7 @@ final class AutoAssignment {
     }
 
     static Map<String, Object> list(Connection db, Map<String, Object> user) throws SQLException {
-        Accounts.requireDispatcher(user);
+        Accounts.requireManager(user);
         String now = TIMESTAMP.format(Instant.now());
         var rows = Db.rows(db, """
             SELECT j.*, w.name AS object_name, u.name AS assignee_name, t.status AS task_status,
@@ -111,7 +111,7 @@ final class AutoAssignment {
     }
 
     static Map<String, Object> run(Connection db, Map<String, Object> user) throws Exception {
-        Accounts.requireDispatcher(user);
+        Accounts.requireManager(user);
         return distribute(db, number(user, "company_id"), false);
     }
 
@@ -167,7 +167,7 @@ final class AutoAssignment {
             }
             var worker = selected.get();
             var actor = Map.<String, Object>of(
-                "id", number(job, "actor_id"), "company_id", company, "name", job.get("actor_name"), "role", "dispatcher");
+                "id", number(job, "actor_id"), "company_id", company, "name", job.get("actor_name"), "role", "manager");
             var fields = Map.<String, Object>of(
                 "assigneeId", Long.toString(worker.id()), "objectId", job.get("object_id").toString(),
                 "title", job.get("title"), "description", job.get("description"), "deadline", job.get("deadline"),

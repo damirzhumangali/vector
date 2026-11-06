@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
-import { KURMANGAZY_DESTINATIONS, TRIP_CITIES } from './TripDestinations';
+import { KURMANGAZY_DESTINATIONS, splitTripDestination } from './TripDestinations';
 import { tripRouteTitle } from './TripRoute';
 import { colors, Icon } from './ui';
 
@@ -29,13 +29,8 @@ function period(start, end) {
 
 function tripPlace(destination, stops = []) {
   const routeTitle = tripRouteTitle(stops);
-  for (const city of TRIP_CITIES) {
-    const prefix = `${city.label} · `;
-    if (!destination?.startsWith(prefix)) continue;
-    const name = destination.slice(prefix.length);
-    return { title: routeTitle ?? shortNames.get(name) ?? name, place: city.label };
-  }
-  return { title: routeTitle ?? shortNames.get(destination) ?? destination };
+  const { city, name } = splitTripDestination(destination);
+  return { title: routeTitle ?? shortNames.get(name) ?? name, place: city };
 }
 
 function offerEntry(offer, employee, canDispatch, open) {

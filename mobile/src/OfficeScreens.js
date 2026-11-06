@@ -235,6 +235,20 @@ function ArrivalSettings({ value, onChange, disabled = false }) {
   </View>;
 }
 
+function fieldVisitScheduleIssue(start, deadline) {
+  const now = Date.now();
+  if (start && !(+start > now)) {
+    return { field: 'start', message: 'Время начала выезда уже прошло. Выберите время позже текущего.' };
+  }
+  if (start && deadline && +deadline <= +start) {
+    return { field: 'deadline', message: 'Срок выполнения должен быть позже начала выезда.' };
+  }
+  if (deadline && !(+deadline > now)) {
+    return { field: 'deadline', message: 'Срок выполнения уже прошёл. Выберите время позже текущего.' };
+  }
+  return null;
+}
+
 function TaskForm({ onCreate, onCancel, employees, objects, onCreateObject, request, server, busy, error, fieldVisit }) {
   const [title, setTitle] = useState('');
   const [purpose, setPurpose] = useState('');
@@ -257,6 +271,7 @@ function TaskForm({ onCreate, onCancel, employees, objects, onCreateObject, requ
   const [radius, setRadius] = useState(100);
   const [scheduledValue, setScheduledValue] = useState(null);
   const [deadlineValue, setDeadlineValue] = useState(null);
+  const [scheduleIssue, setScheduleIssue] = useState(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [validation, setValidation] = useState('');
   const objectInput = useRef(null);
@@ -325,20 +340,23 @@ function TaskForm({ onCreate, onCancel, employees, objects, onCreateObject, requ
     if (saved?.id) setObjectId(saved.id);
   }
 
+  function updateSchedule(start, deadline) {
+    setScheduledValue(start);
+    setDeadlineValue(deadline);
+    if (fieldVisit) setScheduleIssue(fieldVisitScheduleIssue(start, deadline));
+    setValidation('');
+  }
+
   function submit() {
     if (!canCreate || busy || rulesBusy) return;
     const scheduledAt = deadlineToIso(scheduledValue);
     const deadline = deadlineToIso(deadlineValue);
-    if (fieldVisit && (!scheduledAt || +scheduledValue <= Date.now())) {
-      setValidation('Выберите будущие дату и время начала выезда.');
-      return;
-    }
-    if (deadlineValue && (!deadline || +deadlineValue <= Date.now())) {
+    if (fieldVisit) {
+      const issue = fieldVisitScheduleIssue(scheduledValue, deadlineValue);
+      setScheduleIssue(issue);
+      if (issue) return;
+    } else if (deadlineValue && (!deadline || +deadlineValue <= Date.now())) {
       setValidation('Выберите дату и время позже текущего.');
-      return;
-    }
-    if (scheduledAt && deadline && +deadlineValue <= +scheduledValue) {
-      setValidation('Срок выполнения должен быть позже начала выезда.');
       return;
     }
     const itemTitles = checklistText.split('\n').map(value => value.trim()).filter(Boolean);
@@ -474,11 +492,15 @@ function TaskForm({ onCreate, onCancel, employees, objects, onCreateObject, requ
         )}
       </View>
       <View style={styles.card}>
-        {fieldVisit && <DeadlinePicker value={scheduledValue} disabled={busy}
-          label="Дата и время начала" required showQuick={false} showHelper={false}
-          onChange={value => { setScheduledValue(value); setValidation(''); }} />}
+        {fieldVisit && <>
+          <DeadlinePicker value={scheduledValue} disabled={busy}
+            label="Начало выезда" required showQuick={false} showHelper={false}
+            onChange={value => updateSchedule(value, deadlineValue)} />
+          {scheduleIssue?.field === 'start' && <RequestError message={scheduleIssue.message} />}
+        </>}
         <DeadlinePicker value={deadlineValue} disabled={busy}
-          onChange={value => { setDeadlineValue(value); setValidation(''); }} />
+          onChange={value => updateSchedule(scheduledValue, value)} />
+        {scheduleIssue?.field === 'deadline' && <RequestError message={scheduleIssue.message} />}
       </View>
       {server && (
         <View style={styles.card}>

@@ -33,7 +33,6 @@ final class Analytics {
 
     static Map<String, Object> report(Connection db, Map<String, Object> user, Map<String, String> input)
             throws SQLException {
-        Accounts.requireManager(user);
         long company = number(user, "company_id");
         String department = authorizedDepartment(user);
         var filters = Filters.read(input, department);
@@ -155,7 +154,8 @@ final class Analytics {
             "tasks", detail, "rejectedPhotos", rejectedPhotos);
     }
 
-    private static String authorizedDepartment(Map<String, Object> user) {
+    static String authorizedDepartment(Map<String, Object> user) {
+        Accounts.requireManager(user);
         if (number(user, "is_owner") != 0) return "";
         String department = Objects.toString(user.get("department"), "");
         if (department.isBlank()) {
@@ -178,8 +178,8 @@ final class Analytics {
         return histories;
     }
 
-    private static ReportOptions options(Connection db, long company, String department, String scope,
-                                         Object[] scopeParams) throws SQLException {
+    static ReportOptions options(Connection db, long company, String department, String scope,
+                                 Object[] scopeParams) throws SQLException {
         String peopleSql = "SELECT id, name, department FROM users WHERE company_id = ? AND role = 'employee'";
         var employees = department.isEmpty()
             ? Db.rows(db, peopleSql + " ORDER BY name, id", company)
@@ -199,8 +199,8 @@ final class Analytics {
         return new ReportOptions(people, sites, departments);
     }
 
-    private record ReportOptions(List<Map<String, Object>> employees, List<Map<String, Object>> objects,
-                                 List<String> departments) {
+    record ReportOptions(List<Map<String, Object>> employees, List<Map<String, Object>> objects,
+                         List<String> departments) {
         void requireAllowed(Filters filters) {
             if (filters.employee() != null && !contains(employees, filters.employee())) {
                 throw error(403, "Сотрудник вне вашего подразделения.");
@@ -257,8 +257,8 @@ final class Analytics {
         return Duration.between(start, end).toMillis();
     }
 
-    private record Filters(Long employee, Long object, String department, LocalDate from, LocalDate to,
-                           Instant start, Instant end) {
+    record Filters(Long employee, Long object, String department, LocalDate from, LocalDate to,
+                   Instant start, Instant end) {
         static Filters read(Map<String, String> input, String authorizedDepartment) {
             Long employee = filterId(input.get("employeeId"), "Сотрудник");
             Long object = filterId(input.get("objectId"), "Объект");

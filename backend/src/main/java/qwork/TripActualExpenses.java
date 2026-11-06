@@ -83,23 +83,23 @@ final class TripActualExpenses {
         return Db.one(db, "SELECT * FROM work_trip_actual_expenses WHERE trip_id = ?", tripId);
     }
 
-    private static TripBudget expenses(Map<String, Object> row) {
+    static TripBudget expenses(Map<String, Object> row) {
         return new TripBudget(0, number(row, "transport"), number(row, "lodging"),
             number(row, "meals"), number(row, "other"));
     }
 
-    private static long sumExpenses(TripBudget amounts) {
-        return amounts.transport() + amounts.lodging() + amounts.meals() + amounts.other();
+    static TripBudget plannedBudget(Map<String, Object> trip) {
+        Object plannedBudget = trip.get("offer_id") != null || trip.get("budget") == null
+            ? trip.get("estimate") : trip.get("budget");
+        return TripBudget.load(plannedBudget);
     }
 
     private static Map<String, Object> json(Map<String, Object> trip, Map<String, Object> row) {
-        Object plannedBudget = trip.get("offer_id") != null || trip.get("budget") == null
-            ? trip.get("estimate") : trip.get("budget");
-        var plan = TripBudget.load(plannedBudget);
+        var plan = plannedBudget(trip);
         Long workTotal = plan == null ? null : plan.dailyRate() * TripBudget.plannedDays(trip);
-        Long plannedExpenses = plan == null ? null : sumExpenses(plan);
+        Long plannedExpenses = plan == null ? null : plan.expensesTotal();
         Long plannedTotal = plan == null ? null : workTotal + plannedExpenses;
-        Long actualExpenses = row == null ? null : sumExpenses(expenses(row));
+        Long actualExpenses = row == null ? null : expenses(row).expensesTotal();
         Long actualTotal = row == null ? null : actualExpenses + (workTotal == null ? 0 : workTotal);
 
         var out = new LinkedHashMap<String, Object>();

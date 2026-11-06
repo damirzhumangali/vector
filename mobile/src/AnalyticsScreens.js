@@ -4,6 +4,7 @@ import { Directory, File, Paths } from 'expo-file-system';
 import { isAvailableAsync, shareAsync } from 'expo-sharing';
 import Svg, { Circle } from 'react-native-svg';
 import { Icon } from './ui';
+import TripExpenseReport from './TripExpenseReport';
 
 const EMPTY_FILTERS = { employeeId: '', objectId: '', department: '', from: '', to: '' };
 const STATUS_LABELS = {
@@ -14,11 +15,11 @@ const STATUS_LABELS = {
 };
 const PHOTO_LABELS = { before: 'До', after: 'После', material: 'Материал руководителя' };
 
-function queryPath(filters) {
+function queryPath(path, filters) {
   const query = Object.entries(filters)
     .filter(([, value]) => value !== '')
     .map(([key, value]) => `${key}=${encodeURIComponent(value)}`).join('&');
-  return query ? '/analytics?' + query : '/analytics';
+  return query ? path + '?' + query : path;
 }
 
 function validDate(value) {
@@ -207,16 +208,21 @@ function AdditionalMetrics({ metrics }) {
   </View>;
 }
 
-function periodDates(period) {
+function periodDates(period, includeUpcoming = false) {
   if (period === 'all') return { from: '', to: '' };
   const parts = new Intl.DateTimeFormat('en', { timeZone: 'Asia/Almaty', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date());
   const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
   const date = new Date(Date.UTC(Number(values.year), Number(values.month) - 1, Number(values.day)));
-  const end = date.toISOString().slice(0, 10);
+  const today = date.toISOString().slice(0, 10);
   if (period === 'week') date.setUTCDate(date.getUTCDate() - (date.getUTCDay() + 6) % 7);
   if (period === 'month') date.setUTCDate(1);
   if (period === 'year') date.setUTCMonth(0, 1);
-  return { from: date.toISOString().slice(0, 10), to: end };
+  const from = date.toISOString().slice(0, 10);
+  if (!includeUpcoming) return { from, to: today };
+  if (period === 'week') date.setUTCDate(date.getUTCDate() + 6);
+  if (period === 'month') date.setUTCMonth(date.getUTCMonth() + 1, 0);
+  if (period === 'year') date.setUTCMonth(11, 31);
+  return { from, to: date.toISOString().slice(0, 10) };
 }
 
 function Details({ title, count, children }) {
@@ -284,6 +290,24 @@ async function shareReport(file, format) {
 }
 
 export default function AnalyticsScreens({ request, onOpenTask }) {
+  const [tab, setTab] = useState('work');
+  return (
+    <>
+      <View accessibilityRole="tablist" accessibilityLabel="Раздел аналитики" style={styles.tabs}>
+        {[['work', 'Работы'], ['trips', 'Командировки']].map(([key, label]) => (
+          <Pressable key={key} accessibilityRole="tab" accessibilityState={{ selected: tab === key }}
+            style={[styles.tab, tab === key && styles.tabActive]} onPress={() => setTab(key)}>
+            <Text style={[styles.tabText, tab === key && styles.tabTextActive]}>{label}</Text>
+          </Pressable>
+        ))}
+      </View>
+      <AnalyticsReport request={request} onOpenTask={onOpenTask} active={tab === 'work'} />
+      <AnalyticsReport request={request} active={tab === 'trips'} trips />
+    </>
+  );
+}
+
+function AnalyticsReport({ request, onOpenTask, active, trips = false }) {
   const [draft, setDraft] = useState(EMPTY_FILTERS);
   const [applied, setApplied] = useState(EMPTY_FILTERS);
   const [report, setReport] = useState(null);
@@ -301,13 +325,14 @@ export default function AnalyticsScreens({ request, onOpenTask }) {
   const dirty = Object.keys(EMPTY_FILTERS).some(key => draft[key] !== applied[key]);
 
   useEffect(() => {
+    if (!active) return;
     let cancelled = false;
     let running = false;
     async function load() {
       if (cancelled || running) return;
       running = true;
       try {
-        const result = await request(queryPath(applied));
+        const result = await request(queryPath(trips ? '/analytics/trip-expenses' : '/analytics', applied));
         if (!cancelled) {
           setReport(result);
           setLoadedFilters(applied);
@@ -338,11 +363,11 @@ export default function AnalyticsScreens({ request, onOpenTask }) {
       clearInterval(timer);
       foreground.remove();
     };
-  }, [request, applied, refresh]);
+  }, [request, applied, refresh, active, trips]);
 
   function choosePeriod(next) {
     if (exporting) return;
-    const filters = { ...draft, ...periodDates(next) };
+    const filters = { ...draft, ...periodDates(next, trips) };
     setPeriod(next);
     setDraft(filters);
     setApplied(filters);
@@ -377,6 +402,11 @@ export default function AnalyticsScreens({ request, onOpenTask }) {
   const options = report?.options;
   const department = report?.scope?.department;
   const visibleReport = loadedFilters === applied ? report : null;
+  const selectedEmployee = options?.employees.find(item => String(item.id) === applied.employeeId);
+  const subtitle = trips
+    ? [selectedEmployee?.name, department].filter(Boolean).join(' · ') || 'Расходы на командировки'
+    : department ? `Подразделение · ${department}` : 'Статистика выездных работ';
+  if (!active) return null;
   return (
     <>
       <View style={styles.periods}>
@@ -389,7 +419,7 @@ export default function AnalyticsScreens({ request, onOpenTask }) {
       </View>
       <View style={styles.filterToolbar}>
         <View style={styles.flex}><Text style={styles.label}>{periodLabel(applied.from, applied.to)}</Text>
-          <Text style={styles.muted}>{department ? `Подразделение · ${department}` : 'Статистика выездных работ'}</Text></View>
+          <Text style={styles.muted}>{subtitle}</Text></View>
         <Pressable accessibilityRole="button" accessibilityLabel="Открыть фильтры аналитики" onPress={() => setShowFilters(value => !value)} style={styles.filterButton}>
           <Icon name="filter" color="#087CFF" size={20} />
         </Pressable>
@@ -399,7 +429,7 @@ export default function AnalyticsScreens({ request, onOpenTask }) {
       </View>
       {showFilters && <View style={styles.card}>
         <Text accessibilityRole="header" style={styles.title}>Фильтры</Text>
-        <Text style={styles.muted}>Период по дате создания заявки, по времени Алматы. Пустая дата оставляет границу открытой.</Text>
+        <Text style={styles.muted}>{trips ? 'Период по плановой дате начала командировки' : 'Период по дате создания заявки'}, по времени Алматы. Пустая дата оставляет границу открытой.</Text>
         <View style={styles.columns}>
           {[['from', 'С даты'], ['to', 'По дату']].map(([key, label]) => (
             <View key={key} style={styles.dateField}>
@@ -428,7 +458,7 @@ export default function AnalyticsScreens({ request, onOpenTask }) {
       </View>}
       {loading && <Text accessibilityLiveRegion="polite" style={styles.muted}>Загружаем отчёт…</Text>}
       {loadError ? <Text accessibilityRole="alert" style={styles.error}>{loadError}</Text> : null}
-      {visibleReport && (
+      {visibleReport && (trips ? <TripExpenseReport report={report} /> : (
         <>
           <MetricGrid metrics={report.metrics} />
           <Distribution report={report} />
@@ -468,7 +498,7 @@ export default function AnalyticsScreens({ request, onOpenTask }) {
             <TaskRows tasks={report.tasks} onOpenTask={onOpenTask} />
           </Details>
         </>
-      )}
+      ))}
     </>
   );
 }
@@ -504,6 +534,11 @@ const styles = StyleSheet.create({
   pickerRow: { minHeight: 46, justifyContent: 'center', paddingVertical: 8, borderBottomWidth: StyleSheet.hairlineWidth, borderColor: '#ECF0F7' },
   sectionHeading: { flexDirection: 'row', gap: 10, alignItems: 'center' },
   iconTint: { width: 36, height: 36, borderRadius: 10, backgroundColor: '#EDF6FF', alignItems: 'center', justifyContent: 'center' },
+  tabs: { flexDirection: 'row', borderRadius: 12, padding: 4, backgroundColor: '#E8F0FA' },
+  tab: { flex: 1, minHeight: 42, borderRadius: 9, justifyContent: 'center', alignItems: 'center', paddingHorizontal: 6 },
+  tabActive: { backgroundColor: '#FFFFFF' },
+  tabText: { color: '#526A84', fontSize: 13, fontWeight: '600', textAlign: 'center' },
+  tabTextActive: { color: '#087CFF', fontWeight: '700' },
   periods: { flexDirection: 'row', backgroundColor: '#EDF2F9', borderRadius: 10, padding: 3 },
   period: { flex: 1, minHeight: 37, alignItems: 'center', justifyContent: 'center', borderRadius: 8, paddingHorizontal: 3 },
   periodActive: { backgroundColor: '#087CFF' },

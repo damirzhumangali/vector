@@ -18,7 +18,7 @@ function ErrorMessage({ message }) {
   return message ? <Text accessibilityRole="alert" style={styles.error}>{message}</Text> : null;
 }
 
-export function TripApprovalProgress({ stages }) {
+export function TripApprovalProgress({ stages, renderActions }) {
   if (!stages?.length) return null;
   const stopped = stages.some(stage => stage.status === 'rejected');
   return <Card title="Маршрут согласования">
@@ -36,6 +36,7 @@ export function TripApprovalProgress({ stages }) {
           {stage.decidedAt ? ` · ${dateFormat.format(new Date(stage.decidedAt))}` : ''}
         </Text>
         {stage.reason ? <Text style={styles.body}>Причина · {stage.reason}</Text> : null}
+        {renderActions?.(stage)}
       </View>
     </View>)}
   </Card>;
@@ -46,7 +47,8 @@ export function TripApprovalReview({ offer, request, employee = false, offline, 
   const [rejection, setRejection] = useState(null);
   const stops = current.stops ?? [];
   const pending = current.approvalStages?.find(stage => stage.status === 'waiting');
-  const canDecide = !employee && current.status === 'awaiting_approval' && current.canDecideApproval && pending;
+  const showActions = !employee && current.status === 'awaiting_approval';
+  const canDecide = showActions && current.canDecideApproval && Boolean(pending);
   const showReason = canDecide && pending.position === rejection?.position;
   const confirmed = current.status === 'confirmed';
   const rejected = current.status === 'rejected';
@@ -59,6 +61,35 @@ export function TripApprovalReview({ offer, request, employee = false, offline, 
     if (showReason && !offline && await submit('approval', {
       stage: rejection.position, action: 'reject', reason,
     }, rejection.revision)) setRejection(null);
+  }
+
+  function renderActions(stage) {
+    const active = canDecide && stage.position === pending.position;
+    const disabled = !active || busy || offline;
+    if (active && showReason) return <View style={styles.stageDecision}>
+      {offline && <Text style={styles.muted}>Для решения нужен интернет.</Text>}
+      <TripOfferReasonForm title="Отклонить командировку"
+        hint="Сотрудник увидит причину отклонения." actionLabel="Отклонить командировку" busy={busy} offline={offline}
+        onCancel={() => { setRejection(null); clearError(); }} onSubmit={reject} />
+      <ErrorMessage message={error} />
+    </View>;
+    return <View style={styles.stageDecision}>
+      <View style={styles.stageActions}>
+        <TripOfferAction primary icon="check" style={styles.stageAction}
+          accessibilityLabel={`Согласовать · ${stage.title}`} disabled={disabled} onPress={approve}>
+          {active && busy ? 'Согласовываем…' : 'Согласовать'}
+        </TripOfferAction>
+        <TripOfferAction icon="close" danger style={styles.stageAction}
+          accessibilityLabel={`Отклонить · ${stage.title}`} disabled={disabled} onPress={() => {
+            if (!disabled) {
+              clearError();
+              setRejection({ position: stage.position, revision: current.revision });
+            }
+          }}>Отклонить</TripOfferAction>
+      </View>
+      {active && offline ? <Text style={styles.muted}>Для решения нужен интернет.</Text> : null}
+      {active && <ErrorMessage message={error} />}
+    </View>;
   }
 
   return <View style={styles.screen}>
@@ -81,20 +112,8 @@ export function TripApprovalReview({ offer, request, employee = false, offline, 
     </Card>
     <TripOfferTerms offer={current} title={confirmed ? 'Согласованные условия' : 'Условия поездки'} />
     {stops.length > 0 && <TripRouteSummary stops={stops} />}
-    <TripApprovalProgress stages={current.approvalStages} />
-    <ErrorMessage message={error} />
-    {canDecide && offline ? <Text style={styles.muted}>Для решения нужен интернет.</Text> : null}
-    {showReason ? <TripOfferReasonForm title="Отклонить командировку"
-      hint="Сотрудник увидит причину отклонения." actionLabel="Отклонить командировку" busy={busy} offline={offline}
-      onCancel={() => { setRejection(null); clearError(); }} onSubmit={reject} /> : canDecide ? <>
-        <TripOfferAction primary disabled={busy || offline} onPress={approve}>
-          {busy ? 'Согласовываем…' : 'Согласовать командировку'}
-        </TripOfferAction>
-        <TripOfferAction disabled={busy || offline} onPress={() => {
-          clearError();
-          setRejection({ position: pending.position, revision: current.revision });
-        }}>Отклонить</TripOfferAction>
-      </> : null}
+    <TripApprovalProgress stages={current.approvalStages} renderActions={showActions ? renderActions : undefined} />
+    {!canDecide && <ErrorMessage message={error} />}
     {confirmed && current.tripId ? <TripOfferAction primary onPress={() => onTrip(current.tripId)}>
       Открыть командировку
     </TripOfferAction> : null}
@@ -182,6 +201,9 @@ const styles = StyleSheet.create({
   muted: { color: '#536680', fontSize: 13, lineHeight: 18 },
   stage: { flexDirection: 'row', alignItems: 'flex-start', gap: 10, paddingVertical: 5 },
   stageText: { flex: 1, minWidth: 0, gap: 4 },
+  stageDecision: { marginTop: 4, gap: 8 },
+  stageActions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  stageAction: { flexBasis: 120, flexGrow: 1 },
   marker: { backgroundColor: colors.tint, width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
   markerApproved: { backgroundColor: '#E5F7ED' },
   markerRejected: { backgroundColor: '#FFECEF' },

@@ -250,13 +250,13 @@ final class Main {
             throw Domain.error(401, "Войдите в qwork.");
         }
         var token = authorization.substring(7);
-        if (("GET".equals(method) && "/analytics".equals(path))
+        if (("GET".equals(method) && ("/analytics".equals(path) || "/analytics/trip-expenses".equals(path)))
                 || ("POST".equals(method) && "/analytics/export".equals(path))) {
             if (!ANALYTICS_SLOTS.tryAcquire()) {
                 throw Domain.error(429, "Сейчас формируются другие отчёты. Попробуйте снова.");
             }
             try {
-                return analytics(exchange, token, "POST".equals(method));
+                return analytics(exchange, token, path);
             } finally {
                 ANALYTICS_SLOTS.release();
             }
@@ -311,7 +311,8 @@ final class Main {
         }
     }
 
-    private static Result analytics(HttpExchange exchange, String token, boolean export) throws Exception {
+    private static Result analytics(HttpExchange exchange, String token, String path) throws Exception {
+        boolean export = "/analytics/export".equals(path);
         Map<String, String> filters;
         String format = "";
         if (export) {
@@ -335,7 +336,9 @@ final class Main {
         try (var db = Db.connect(false)) {
             if (Db.postgres()) db.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
             var user = Accounts.authenticate(db, token);
-            report = Analytics.report(db, user, filters);
+            report = "/analytics/trip-expenses".equals(path)
+                ? TripExpenseAnalytics.report(db, user, filters)
+                : Analytics.report(db, user, filters);
         }
         if (!export) return ok(report);
         boolean spreadsheet = "xlsx".equals(format);

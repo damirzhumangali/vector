@@ -1,6 +1,7 @@
 import React, { useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import DeadlinePicker, { deadlineToIso } from './DeadlinePicker';
+import { splitTripDestination } from './TripDestinations';
 import { colors, Icon } from './ui';
 
 const dateFormat = new Intl.DateTimeFormat('ru-RU', {
@@ -38,12 +39,16 @@ function routeError(value, stops, start, end) {
     return 'Сначала укажите начало и окончание командировки.';
   }
   const times = value.map(stop => timestamp(stop.plannedAt));
-  if (times.some(time => !Number.isFinite(time))) return stops.length === 1
+  const scheduled = times.filter(Number.isFinite);
+  if (new Set(scheduled).size !== scheduled.length) {
+    return 'У нескольких объектов совпадают дата и время. Укажите разное время посещения.';
+  }
+  if (scheduled.length !== times.length) return stops.length === 1
     ? 'Выберите дату и время посещения объекта.' : 'Выберите дату и время каждой точки.';
   if (times.some(time => time < beginning || time > finish)) return stops.length === 1
     ? 'Время посещения объекта должно быть в периоде поездки.' : 'Время каждой точки должно быть в периоде поездки.';
-  if (times.some((time, index) => index > 0 && time <= times[index - 1])) {
-    return 'Время точек должно идти по возрастанию. Измените порядок или время.';
+  if (times.some((time, index) => index > 0 && time < times[index - 1])) {
+    return 'Измените время посещения, чтобы обновить порядок маршрута.';
   }
   return '';
 }
@@ -61,9 +66,13 @@ function RouteButton({ children, label, onPress, primary, disabled }) {
 }
 
 function StopHeading({ index, destination, multiple }) {
+  const { city, name } = splitTripDestination(destination);
   return <View style={styles.heading}>
     {multiple && <Text style={styles.index}>{index + 1}</Text>}
-    <Text accessibilityRole="header" style={styles.stopName}>{destination}</Text>
+    <View style={styles.stopTitle}>
+      {city ? <Text style={styles.muted}>{city}</Text> : null}
+      <Text accessibilityRole="header" numberOfLines={2} ellipsizeMode="tail" style={styles.stopName}>{name}</Text>
+    </View>
   </View>;
 }
 
@@ -81,23 +90,23 @@ export function TripRouteEditor({ stops = [], value = [], onChange, start, end, 
   const firstDate = validPeriod ? new Date(startAt) : undefined;
   const lastDate = validPeriod ? new Date(endAt) : undefined;
 
-  function move(index, delta) {
-    if (disabled || index + delta < 0 || index + delta >= route.length) return;
-    const next = [...route];
-    [next[index], next[index + delta]] = [next[index + delta], next[index]];
-    onChange(next);
-  }
-
   function setTime(id, date) {
-    if (canPickTime) {
-      onChange(route.map(item => item.id === id ? { ...item, plannedAt: deadlineToIso(date) } : item));
-    }
+    if (!canPickTime) return;
+    const plannedAt = deadlineToIso(date);
+    const next = route.map(item => item.id === id ? { ...item, plannedAt } : item);
+    next.sort((left, right) => {
+      const first = timestamp(left.plannedAt);
+      const second = timestamp(right.plannedAt);
+      if (Number.isNaN(first)) return Number.isNaN(second) ? 0 : 1;
+      return Number.isNaN(second) ? -1 : first - second;
+    });
+    onChange(next);
   }
 
   return <View style={styles.card}>
     <Text accessibilityRole="header" style={styles.title}>{multiple ? 'Время посещения объектов' : 'Время посещения объекта'}</Text>
     <Text style={styles.muted}>{multiple
-      ? 'Выберите дату и время для каждого объекта в пределах периода поездки. Порядок можно менять.'
+      ? 'Укажите дату и время каждого визита. Объекты выстроятся по времени посещения.'
       : 'Выберите дату и время визита на объект в пределах периода поездки.'}</Text>
     {route.map(({ id, plannedAt }, index) => {
       const destination = assigned.get(String(id))?.destination;
@@ -105,12 +114,6 @@ export function TripRouteEditor({ stops = [], value = [], onChange, start, end, 
       const open = !multiple || openId === id;
       return <View key={id} style={styles.stop}>
         <StopHeading index={index} destination={destination} multiple={multiple} />
-        {multiple && <View style={styles.actions}>
-          <RouteButton label={'Переместить выше · ' + destination} disabled={disabled || index === 0}
-            onPress={() => move(index, -1)}>Выше</RouteButton>
-          <RouteButton label={'Переместить ниже · ' + destination} disabled={disabled || index === route.length - 1}
-            onPress={() => move(index, 1)}>Ниже</RouteButton>
-        </View>}
         {multiple && <Pressable accessibilityRole="button" accessibilityLabel={'Дата и время · ' + destination}
           accessibilityState={{ expanded: open, disabled: !canPickTime }} disabled={!canPickTime}
           onPress={() => setOpenId(open ? null : id)} style={styles.schedule}>
@@ -208,7 +211,8 @@ const styles = StyleSheet.create({
   index: { backgroundColor: colors.tint, color: '#185DB0', fontSize: 14, minWidth: 26, minHeight: 26,
     paddingHorizontal: 5, paddingTop: 4, textAlign: 'center', borderRadius: 7, fontWeight: '700' },
   title: { color: colors.ink, fontSize: 17, fontWeight: '700' },
-  stopName: { flex: 1, color: colors.ink, fontSize: 14, fontWeight: '700', lineHeight: 20 },
+  stopTitle: { flex: 1, gap: 2 },
+  stopName: { color: colors.ink, fontSize: 14, fontWeight: '700', lineHeight: 20 },
   body: { color: colors.ink, fontSize: 14, lineHeight: 19 },
   muted: { color: '#536680', fontSize: 13, lineHeight: 18 },
   actions: { flexDirection: 'row', flexWrap: 'wrap', gap: 7 },

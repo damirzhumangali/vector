@@ -70,9 +70,13 @@ record TripBudget(long dailyRate, long transport, long lodging, long meals, long
 
     Map<String, Object> json(long days) {
         long workTotal = dailyRate * days;
-        long expensesTotal = transport + lodging + meals + other;
+        long expensesTotal = expensesTotal();
         return Map.of("currency", "KZT", "days", days, "dailyRate", dailyRate,
             "transport", transport, "lodging", lodging, "meals", meals, "other", other,
             "workTotal", workTotal, "expensesTotal", expensesTotal, "total", workTotal + expensesTotal);
+    }
+
+    long expensesTotal() {
+        return transport + lodging + meals + other;
     }
 }

@@ -51,10 +51,14 @@ export function useTripOfferAction(offer, request, onChanged) {
   return { current, busy, error, submit, clearError: () => setError('') };
 }
 
-export function TripOfferAction({ children, onPress, disabled, primary }) {
-  return <Pressable accessibilityRole="button" accessibilityState={{ disabled }} disabled={disabled} onPress={onPress}
-    style={({ pressed }) => [primary ? styles.primary : styles.secondary, (disabled || pressed) && styles.disabled]}>
-    <Text style={primary ? styles.primaryText : styles.backText}>{children}</Text>
+export function TripOfferAction({ children, onPress, disabled, primary, icon, danger, accessibilityLabel, style }) {
+  return <Pressable accessibilityRole="button" accessibilityLabel={accessibilityLabel}
+    accessibilityState={{ disabled }} disabled={disabled} onPress={onPress}
+    style={({ pressed }) => [primary ? styles.primary : styles.secondary, danger && styles.dangerAction,
+      icon && styles.actionWithIcon, style, (disabled || pressed) && styles.disabled]}>
+    {icon && <Icon name={icon} size={19} color={primary ? '#FFFFFF' : danger ? styles.dangerText.color : colors.blue} />}
+    <Text style={[primary ? styles.primaryText : styles.backText, danger && styles.dangerText,
+      icon && styles.actionLabel]}>{children}</Text>
   </Pressable>;
 }
 
@@ -299,6 +303,10 @@ const styles = StyleSheet.create({
     borderRadius: 10, backgroundColor: '#136BC9' },
   primaryText: { textAlign: 'center', color: '#FFFFFF', fontSize: 14, fontWeight: '700' },
   secondary: { minHeight: 44, justifyContent: 'center', alignItems: 'center', padding: 9 },
+  actionWithIcon: { flexDirection: 'row', gap: 8 },
+  actionLabel: { flexShrink: 1 },
+  dangerAction: { backgroundColor: '#FFF1F3', borderRadius: 10 },
+  dangerText: { color: '#A53146' },
   disabled: { opacity: 0.55 },
   historyToggle: { minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: 9 },
   historyItem: { borderTopWidth: 1, borderColor: colors.border, paddingTop: 9, gap: 4 },

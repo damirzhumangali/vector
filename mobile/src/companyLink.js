@@ -1,9 +1,9 @@
 import { createURL } from 'expo-linking';
 
 const codePattern = /^[a-f0-9]{12}$/i;
-const invitationPattern = /^(?:qwork:\/\/\/?|exps?:\/\/[^/?#\s]+\/--\/)invite\/([a-f0-9]{12})\/?(?:[?#][^\s]*)?$/i;
+const invitationPattern = /^(?:qwork(?:-local)?:\/\/\/?|exps?:\/\/[^/?#\s]+\/--\/)invite\/([a-f0-9]{12})\/?(?:[?#][^\s]*)?$/i;
 const employeeTokenPattern = /^[A-Za-z0-9_-]{43}$/;
-const employeeInvitationPattern = /^(?:qwork:\/\/\/?|exps?:\/\/[^/?#\s]+\/--\/)join\/([A-Za-z0-9_-]{43})\/?$/;
+const employeeInvitationPattern = /^(?:qwork(?:-local)?:\/\/\/?|exps?:\/\/[^/?#\s]+\/--\/)join\/([A-Za-z0-9_-]{43})\/?$/;
 const publicOriginPattern = /^https:\/\/[a-z0-9.-]+(?::\d{1,5})?\/?$/i;
 const publicInvitationPattern = /^([^/]+\/\/[^/]+)\/join#([A-Za-z0-9_-]{43})$/;
 const configuredOrigin = (process.env.EXPO_PUBLIC_QWORK_INVITE_URL ?? '').trim();

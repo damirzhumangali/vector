@@ -355,6 +355,7 @@ export function VisitOptionPicker({ label, icon, options, selected, onSelect, di
 }
 
 const MAX_TRIP_ORGANIZATIONS = 30;
+const TRIP_CITY_OPTIONS = [...TRIP_CITIES, { id: '', label: 'Без города' }];
 
 function organizationKey(name) {
   return name.normalize('NFC').trim().replace(/\s+/g, ' ').toLowerCase();
@@ -368,7 +369,7 @@ function TripForm({ request, objects = [], onCreated, onCancel, offline = false,
   const [organizations, setOrganizations] = useState([]);
   const [addingOrganization, setAddingOrganization] = useState(false);
   const [newOrganization, setNewOrganization] = useState('');
-  const [city, setCity] = useState('');
+  const [cityName, setCityName] = useState('');
   const [destination, setDestination] = useState('');
   const [purpose, setPurpose] = useState('');
   const [comment, setComment] = useState('');
@@ -390,7 +391,6 @@ function TripForm({ request, objects = [], onCreated, onCancel, offline = false,
   const atLimit = organizations.length >= MAX_TRIP_ORGANIZATIONS;
   const canAddOrganization = Boolean(onAddOrganization && !blocked && !busy && !atLimit);
   const selectedObject = objects.find(object => String(object.id) === objectId);
-  const cityName = city.trim();
   const manualName = destination.trim();
   let visitNames = [];
   if (placeSource === 'organizations') visitNames = organizations;
@@ -463,12 +463,9 @@ function TripForm({ request, objects = [], onCreated, onCancel, offline = false,
     <View style={styles.screen}>
       <View style={styles.choices}><Button disabled={busy} onPress={onCancel}>‹ К выездам</Button></View>
       <Card title="Новая командировка" icon="pin">
-        <Field label="Город" value={city} onChange={setCity} limit={300}
-          disabled={busy} placeholder="Введите название города" />
-        <View style={styles.choices}>
-          {TRIP_CITIES.map(item => <Button key={item.id} selected={cityName === item.id} disabled={busy}
-            onPress={() => setCity(item.id)}>{item.label}</Button>)}
-        </View>
+        <Text style={styles.label}>Город</Text>
+        <VisitOptionPicker label="Выбрать город" icon="pin" options={TRIP_CITY_OPTIONS}
+          selected={cityName || undefined} onSelect={setCityName} disabled={busy} visibleLimit={TRIP_CITY_OPTIONS.length} />
         <Text style={styles.muted}>Можно указать только город или добавить организации и объекты ниже.</Text>
         <Text style={styles.label}>Организации и объекты</Text>
         {placeSource === 'organizations' && <>

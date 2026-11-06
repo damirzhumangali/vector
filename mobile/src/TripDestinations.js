@@ -1,6 +1,34 @@
 const district = 'Курмангазинского района Атырауской области';
 
-export const TRIP_CITIES = [{ id: 'Атырау', label: 'Атырау' }];
+export const TRIP_CITIES = [
+  'Актау',
+  'Актобе',
+  'Алматы',
+  'Астана',
+  'Атырау',
+  'Жезказган',
+  'Караганда',
+  'Кокшетау',
+  'Конаев',
+  'Костанай',
+  'Кульсары',
+  'Кызылорда',
+  'Павлодар',
+  'Петропавловск',
+  'Семей',
+  'Талдыкорган',
+  'Тараз',
+  'Туркестан',
+  'Уральск',
+  'Усть-Каменогорск',
+  'Шымкент',
+].map(city => ({ id: city, label: city }));
+
+export function splitTripDestination(destination) {
+  const separator = ' · ';
+  const city = TRIP_CITIES.find(option => destination?.startsWith(option.label + separator))?.label;
+  return city ? { city, name: destination.slice(city.length + separator.length) } : { name: destination };
+}
 
 export const KURMANGAZY_DESTINATIONS = [
   'Аппарат акима сельского округа Курмангазы',

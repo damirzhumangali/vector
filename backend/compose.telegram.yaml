@@ -1,0 +1,40 @@
+name: qwork-telegram
+
+services:
+  telegram:
+    build: .
+    user: "10001:10001"
+    restart: unless-stopped
+    logging:
+      driver: local
+    environment:
+      QWORK_TELEGRAM_CONFIG: /var/lib/qwork/telegram-reports.json
+      QWORK_TELEGRAM_DB: /var/lib/qwork/telegram-reports.sqlite3
+    volumes:
+      - type: bind
+        source: ${QWORK_TELEGRAM_DATA_DIR:-./data/telegram}
+        target: /var/lib/qwork
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${QWORK_TELEGRAM_DATA_DIR:-./data/telegram}/.telegram-token
+        target: /var/lib/qwork/.telegram-token
+        read_only: true
+        bind:
+          create_host_path: false
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        if [ ! -r /var/lib/qwork/.telegram-token ]; then
+          echo 'Не удаётся прочитать файл .telegram-token.' >&2
+          exit 1
+        fi
+        QWORK_TELEGRAM_BOT_TOKEN="$$(cat /var/lib/qwork/.telegram-token)"
+        if [ -z "$$QWORK_TELEGRAM_BOT_TOKEN" ]; then
+          echo 'Файл .telegram-token пуст.' >&2
+          exit 1
+        fi
+        export QWORK_TELEGRAM_BOT_TOKEN
+        umask 077
+        exec java -cp /app/qwork-api.jar qwork.TelegramReports

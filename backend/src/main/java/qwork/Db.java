@@ -95,14 +95,18 @@ final class Db {
     }
 
     private static Connection openPostgres() throws SQLException {
+        return openPostgres(DATABASE_URL, "QWORK_DATABASE_URL");
+    }
+
+    static Connection openPostgres(String databaseUrl, String variableName) throws SQLException {
         Properties properties = new Properties();
         properties.setProperty("connectTimeout", "5");
-        if (DATABASE_URL.startsWith("jdbc:postgresql:")) {
-            return DriverManager.getConnection(DATABASE_URL, properties);
+        if (databaseUrl.startsWith("jdbc:postgresql:")) {
+            return DriverManager.getConnection(databaseUrl, properties);
         }
 
         try {
-            URI uri = URI.create(DATABASE_URL);
+            URI uri = URI.create(databaseUrl);
             if (!List.of("postgres", "postgresql").contains(uri.getScheme()) || uri.getHost() == null) {
                 throw new IllegalArgumentException();
             }
@@ -120,7 +124,7 @@ final class Db {
             return DriverManager.getConnection("jdbc:postgresql://" + uri.getHost() + port + path + query, properties);
         } catch (IllegalArgumentException | NullPointerException error) {
             // Connection strings may contain secrets, so do not propagate the URI parser's error.
-            throw new SQLException("Invalid QWORK_DATABASE_URL");
+            throw new SQLException("Invalid " + variableName);
         }
     }
 

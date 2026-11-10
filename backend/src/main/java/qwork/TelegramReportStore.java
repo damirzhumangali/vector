@@ -405,6 +405,16 @@ final class TelegramReportStore implements AutoCloseable {
         return deadlines("SELECT * FROM telegram_report_deadlines WHERE " + MISSING_REPORT);
     }
 
+    List<DeadlineAssignment> reportedAssignments() throws SQLException {
+        return Db.rows(db, """
+            SELECT DISTINCT r.engineer_id, v.site_id
+            FROM telegram_report_versions v JOIN telegram_reports r ON r.id = v.delivery_id
+            WHERE r.failed = 0
+            """).stream()
+            .map(row -> new DeadlineAssignment(nullableLong(row.get("engineer_id")), (String) row.get("site_id")))
+            .toList();
+    }
+
     List<Deadline> dueDeadlines(long now) throws SQLException {
         return deadlines("SELECT * FROM telegram_report_deadlines WHERE " + REMINDER_DUE + " AND " + MISSING_REPORT,
             now, now);

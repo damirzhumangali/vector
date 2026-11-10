@@ -12,7 +12,6 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -69,7 +68,7 @@ final class TelegramReportsCheck {
 
                 try {
                     bot.deliver();
-                    throw new AssertionError("Expected Telegram 500 during second copy");
+                    throw new AssertionError("Expected Telegram 500 during report summary");
                 } catch (TelegramReportApi.ApiFailure failure) {
                     check(failure.status() == 500, "Temporary failure lost its status");
                     check(!failure.toString().contains(TOKEN) && !failure.toString().contains("private description"),
@@ -81,7 +80,7 @@ final class TelegramReportsCheck {
 
             try (var store = new TelegramReportStore(database)) {
                 var restarted = new TelegramReports(catalog, store, api);
-                check(store.offset() == 21, "Submission offset did not survive restart");
+                check(store.offset() == AFTER + 1, "Video submission offset did not survive restart");
                 restarted.deliver();
                 restarted.deliver();
                 check(store.pending() == null, "Report stayed in delivery queue");
@@ -96,8 +95,8 @@ final class TelegramReportsCheck {
                 check(telegram.messages(ENGINEER).size() == messages,
                     "Restart repeated an already sent deadline reminder");
             }
-            try (var store = new TelegramReportStore(directory.resolve("deadline-buttons.sqlite3"))) {
-                checkDeadlineButtons(catalog, api, telegram, store);
+            try (var store = new TelegramReportStore(directory.resolve("legacy-video-draft.sqlite3"))) {
+                checkLegacyVideoDraft(new TelegramReports(catalog, store, api), telegram, store);
             }
         }
         System.out.println("Telegram report workflow passed.");
@@ -112,11 +111,11 @@ final class TelegramReportsCheck {
         TelegramReports.syncCommandMenus(roles, api);
         check("all_private_chats".equals(telegram.calls.get(1).payload().path("scope").path("type").asText())
             && telegram.menu(null).equals(List.of("start", "help", "id")), "Fallback menu exposed work commands");
-        check(telegram.menu(SECOND_ENGINEER).equals(List.of("new", "cancel", "deadline", "start", "help", "id")),
+        check(telegram.menu(SECOND_ENGINEER).equals(List.of("new", "cancel", "start", "help", "id")),
             "Engineer menu did not contain only its allowed work commands");
         check(telegram.menu(REVIEWER).equals(List.of("missing", "start", "help", "id")),
             "Reviewer menu did not contain only its allowed work commands");
-        check(telegram.menu(ENGINEER).equals(List.of("new", "cancel", "deadline", "missing", "start", "help", "id")),
+        check(telegram.menu(ENGINEER).equals(List.of("new", "cancel", "missing", "start", "help", "id")),
             "An engineer who also reviews reports did not receive both sets of commands");
     }
 
@@ -137,13 +136,14 @@ final class TelegramReportsCheck {
         telegram.failCommandsOnce.set(true);
         bot.handle(message(5, ENGINEER, Map.of("text", "/start")));
         check(buttons(telegram.lastMessage(ENGINEER)).equals(List.of("site:north"))
-            && telegram.lastText(ENGINEER).contains("1 из 4"), "Start did not list only the engineer's assigned object");
+            && telegram.lastText(ENGINEER).contains("Выберите свой объект"),
+            "Start did not list only the engineer's assigned object");
         bot.handle(message(6, ENGINEER, Map.of("text", "алматы")));
         check(buttons(telegram.lastMessage(ENGINEER)).isEmpty(), "Search revealed another engineer's object");
         bot.handle(message(7, ENGINEER, Map.of("text", "астана")));
         check("site:north".equals(telegram.lastButton(ENGINEER)), "Region search did not offer the configured object");
         bot.handle(callback(8, ENGINEER, "site:north"));
-        check(telegram.lastText(ENGINEER).contains("2 из 4")
+        check(telegram.lastText(ENGINEER).contains("Видео после работ")
             && telegram.lastText(ENGINEER).contains("Северный объект"), "Video prompt omitted the selected object");
 
         bot.handle(message(9, ENGINEER, Map.of("photo", List.of(Map.of("file_id", "photo")))));
@@ -157,42 +157,27 @@ final class TelegramReportsCheck {
 
         var after = message(AFTER, ENGINEER, Map.of("document", Map.of("file_id", "after", "mime_type", "video/mp4")));
         bot.handle(after);
-        int messagesAfterVideo = telegram.messages(ENGINEER).size();
+        var queued = store.pending();
+        check(store.draft(ENGINEER) == null && queued != null && queued.after() == AFTER
+            && queued.before() == null && queued.documents().isEmpty(),
+            "Sending one video without a caption did not submit the report");
         bot.handle(after);
-        var savedVideo = store.draft(ENGINEER);
-        check(savedVideo.before() == null && Long.valueOf(AFTER).equals(savedVideo.after())
-            && telegram.messages(ENGINEER).size() == messagesAfterVideo, "The first video was stored in the wrong slot or processed twice");
-        bot.handle(message(17, ENGINEER, Map.of("text", "/start")));
-        check(telegram.lastText(ENGINEER).contains("3 из 4") && telegram.lastText(ENGINEER).contains("Видео после работ получено"),
-            "Resuming the draft did not show the result step after one video");
-        bot.handle(message(18, ENGINEER, Map.of("text", RESULT)));
-        bot.handle(message(DOCUMENT, ENGINEER, Map.of("document", Map.of("file_id", "act", "mime_type", "application/pdf"))));
-
-        String sendAction = telegram.lastButton(ENGINEER);
-        String preview = telegram.lastText(ENGINEER);
-        check(sendAction.startsWith("send:") && preview.contains("4 из 4") && preview.contains(RESULT)
-            && preview.contains("✓ Видео после работ") && !preview.contains("Видео до работ")
-            && preview.contains("вложений: 1 из 5"), "Complete draft did not show one saved video, attachment count, result and submission button");
-        var submit = callback(20, ENGINEER, sendAction);
-        bot.handle(submit);
-        check(telegram.lastText(ENGINEER).contains("принят к отправке"), "No receipt for the accepted report");
-        bot.handle(submit);
-        bot.handle(callback(21, ENGINEER, sendAction));
-        check(store.draft(ENGINEER) == null && store.pending() != null, "Submission did not move draft into the queue");
+        check(store.pending().id() == queued.id() && store.review(queued.id() + 1) == null,
+            "Retrying the video queued a second report");
         check(telegram.reviewCalls().isEmpty(), "Bot copied media before the delivery worker ran");
     }
 
     private static void checkDelivery(MockTelegram telegram) {
         var calls = telegram.reviewCalls();
-        check(calls.size() == 4, "A report or attachment was lost or sent twice");
+        check(calls.size() == 3, "A report or video was lost or sent twice");
         checkCopy(calls.get(0), AFTER, 200, "Видео после");
-        checkCopy(calls.get(1), DOCUMENT, 500, "Вложение 1");
-        checkCopy(calls.get(2), DOCUMENT, 200, "Вложение 1");
-        var summary = calls.get(3);
-        check("sendMessage".equals(summary.method()), "Report summary was not sent as text");
+        check("sendMessage".equals(calls.get(1).method()) && calls.get(1).status() == 500,
+            "The simulated failure did not happen after the video copy");
+        var summary = calls.get(2);
+        check("sendMessage".equals(summary.method()) && summary.status() == 200, "Report summary was not delivered as text");
         String text = summary.payload().path("text").asText();
         check(text.contains("Отчёт №1") && text.contains("Северный объект") && text.contains("Тестовый инженер")
-                && text.contains(RESULT), "Summary omitted report data");
+                && !text.contains("Результат:"), "Summary omitted report data or added an empty result");
         check(!summary.payload().has("parse_mode") && summary.payload().path("link_preview_options").path("is_disabled").asBoolean(),
             "Summary did not send plain text with previews disabled");
         check(telegram.lastText(ENGINEER).contains("доставлены в чат проверки"), "Engineer did not get delivery confirmation");
@@ -259,12 +244,19 @@ final class TelegramReportsCheck {
         check(replacement != null && "north".equals(replacement.siteId()) && replacement.before() == null
                 && replacement.after() == null && replacement.documents().isEmpty(),
             "Replacing materials did not reset evidence while keeping the object");
+        bot.handle(message(301, ENGINEER, Map.of("video", Map.of("file_id", "replacement"))));
+        check(store.draft(ENGINEER).after() == 301L && store.pending() == null
+                && button(telegram.lastMessage(ENGINEER), "send:").endsWith(":301"),
+            "A replacement video did not reach the optional preview");
         bot.handle(message(31, ENGINEER, Map.of("text", "/cancel")));
 
         bot.handle(callback(32, ENGINEER, revise));
         var draft = store.draft(ENGINEER);
         check(draft != null && draft.before() == null && Long.valueOf(AFTER).equals(draft.after())
-                && draft.documents().equals(List.of(DOCUMENT)), "Revision lost previously submitted evidence");
+                && draft.documents().isEmpty(), "Revision lost previously submitted video");
+        bot.handle(message(320, ENGINEER, Map.of("text", "/send")));
+        check(store.pending() == null && telegram.lastText(ENGINEER).contains("исправленный комментарий"),
+            "Text correction could resend the returned report without a correction");
         String amended = "Проверили вход №2, считыватель работает.";
         bot.handle(message(33, ENGINEER, Map.of("text", amended)));
         String resubmit = button(telegram.lastMessage(ENGINEER), "send:");
@@ -322,6 +314,15 @@ final class TelegramReportsCheck {
         check(telegram.calls.size() == before && bot.nextReminderAt() == Long.MAX_VALUE,
             "An unauthorized user accessed report deadlines");
 
+        bot.handle(message(106, REVIEWER, Map.of("text", "/missing")));
+        check(telegram.lastText(REVIEWER).contains("Южный объект")
+            && telegram.lastText(REVIEWER).contains("Видеоотчёт ещё не отправлен")
+            && !telegram.lastText(REVIEWER).contains("Северный объект"),
+            "Reviewers could not see assigned objects awaiting their first report without deadlines");
+        int engineerMessages = telegram.messages(SECOND_ENGINEER).size();
+        bot.handle(message(107, SECOND_ENGINEER, Map.of("text", "/missing")));
+        check(telegram.messages(SECOND_ENGINEER).size() == engineerMessages, "Engineer could access the reviewer list");
+
         var assignments = List.of(new TelegramReportStore.DeadlineAssignment(ENGINEER, "north"),
             new TelegramReportStore.DeadlineAssignment(SECOND_ENGINEER, "south"));
         long due = dueAt.toEpochSecond();
@@ -332,9 +333,9 @@ final class TelegramReportsCheck {
             && bot.nextReminderAt() == due, "A historical report satisfied a new deadline");
 
         bot.handle(callback(104, SECOND_ENGINEER, "site:south"));
-        bot.handle(message(105, SECOND_ENGINEER, Map.of("video", Map.of("file_id", "new-video"))));
-        bot.handle(message(106, SECOND_ENGINEER, Map.of("text", RESULT)));
-        bot.handle(message(107, SECOND_ENGINEER, Map.of("text", "/send")));
+        bot.handle(message(105, SECOND_ENGINEER, Map.of("video", Map.of("file_id", "new-video"), "caption", RESULT)));
+        check(store.pending() != null && store.pending().header().contains(RESULT),
+            "Submitting a video lost its optional caption");
         store.setDeadlines(108, assignments, Instant.now().getEpochSecond(), due);
         bot.handle(message(109, REVIEWER, Map.of("text", "/missing")));
         check(telegram.lastText(REVIEWER).contains("Северный объект")
@@ -353,108 +354,33 @@ final class TelegramReportsCheck {
             && bot.nextReminderAt() == Long.MAX_VALUE, "Reminder was duplicated, missed or sent to the wrong engineer");
     }
 
-    private static void checkDeadlineButtons(TelegramReportCatalog catalog, TelegramReportApi api,
-            MockTelegram telegram, TelegramReportStore store) throws Exception {
-        var zone = ZoneId.of("Asia/Almaty");
-        var tomorrow = ZonedDateTime.now(zone).toLocalDate().plusDays(1);
-        var reviewers = new LinkedHashMap<>(catalog.reviewers());
-        reviewers.put(ENGINEER, catalog.engineers().get(ENGINEER));
-        var roles = new TelegramReportCatalog(catalog.reviewChatId(), catalog.engineers(), catalog.sites(),
-            reviewers, catalog.assignments());
-        var deadlineMenu = new TelegramReportDeadlineMenu(roles, api);
-        var bot = new TelegramReports(roles, store, api, deadlineMenu);
-        bot.handle(message(120, REVIEWER, Map.of("text", "/deadline")));
-        check(telegram.lastText(REVIEWER).contains("Срок сдачи выбирает сотрудник для своего объекта")
-            && buttons(telegram.lastMessage(REVIEWER)).isEmpty(), "A reviewer opened the deadline picker");
-        bot.handle(message(121, UNASSIGNED_ENGINEER, Map.of("text", "/deadline")));
-        check(buttons(telegram.lastMessage(UNASSIGNED_ENGINEER)).isEmpty(),
-            "An engineer without assignments was offered a deadline picker");
-
-        bot.handle(message(122, SECOND_ENGINEER, Map.of("text", "/deadline")));
-        var objectChoices = telegram.lastMessage(SECOND_ENGINEER);
-        check(objectChoices.payload().path("text").asText().contains("Выберите объект для отчёта")
-            && !deadlineButton(objectChoices, "Южный объект").isEmpty()
-            && deadlineButton(objectChoices, "Северный объект").isEmpty()
-            && deadlineButton(objectChoices, "Все объекты").isEmpty(),
-            "The deadline picker did not limit selection to individual assigned sites");
-        long messageId = objectChoices.messageId();
-
-        bot = new TelegramReports(roles, store, api, deadlineMenu);
-        pressDeadlineButton(bot, 123, SECOND_ENGINEER, objectChoices, "Южный объект");
-        var dates = telegram.deadlineStep(SECOND_ENGINEER, messageId);
-        check(dates.payload().path("text").asText().contains("Выберите дату"), "No deadline date picker was shown");
-        pressDeadlineButton(bot, 124, SECOND_ENGINEER, dates, "Завтра");
-        var times = telegram.deadlineStep(SECOND_ENGINEER, messageId);
-        check(times.payload().path("text").asText().contains("Выберите время")
-            && !deadlineButton(times, "18:00").isEmpty(), "No deadline time picker with quick choices was shown");
-        pressDeadlineButton(bot, 125, SECOND_ENGINEER, times, "Другое время");
-        pressDeadlineButton(bot, 126, SECOND_ENGINEER, telegram.deadlineStep(SECOND_ENGINEER, messageId), "17 ч");
-        pressDeadlineButton(bot, 127, SECOND_ENGINEER, telegram.deadlineStep(SECOND_ENGINEER, messageId), "40–49");
-        pressDeadlineButton(bot, 128, SECOND_ENGINEER, telegram.deadlineStep(SECOND_ENGINEER, messageId), "17:47");
-        var confirmation = telegram.deadlineStep(SECOND_ENGINEER, messageId);
-        String text = confirmation.payload().path("text").asText();
-        check(text.contains("Второй инженер") && text.contains("Южный объект") && text.contains("17:47"),
-            "Confirmation did not show the selected assignment and time");
-        check(store.missingDeadlines().isEmpty(), "Opening deadline confirmation created a deadline");
-
-        String confirm = deadlineButton(confirmation, "Подтвердить");
-        bot.handle(callback(129, ENGINEER, ENGINEER, messageId, confirm));
-        bot.handle(callback(130, REVIEWER, REVIEWER, messageId, confirm));
-        check(store.missingDeadlines().isEmpty(), "A different user confirmed the engineer's deadline");
-        pressDeadlineButton(bot, 131, SECOND_ENGINEER, confirmation, "Подтвердить");
-        var deadlines = store.missingDeadlines();
-        check(deadlines.size() == 1 && deadlines.getFirst().engineerId() == SECOND_ENGINEER
-            && "south".equals(deadlines.getFirst().siteId())
-            && deadlines.getFirst().dueAt() == tomorrow.atTime(17, 47).atZone(zone).toEpochSecond()
-            && bot.nextReminderAt() == deadlines.getFirst().dueAt()
-            && telegram.deadlineStep(SECOND_ENGINEER, messageId).payload().path("text").asText()
-                .contains("Срок сдачи установлен"), "Deadline buttons did not confirm the selected object and time");
-        bot.handle(message(132, REVIEWER, Map.of("text", "/missing")));
-        check(telegram.lastText(REVIEWER).contains("Южный объект")
-            && telegram.lastText(REVIEWER).contains("Второй инженер")
-            && telegram.lastText(REVIEWER).contains("17:47"), "Reviewer could not see the employee's deadline");
-        int replies = telegram.messages(SECOND_ENGINEER).size();
-        bot.handle(message(133, SECOND_ENGINEER, Map.of("text", "/missing")));
-        check(telegram.messages(SECOND_ENGINEER).size() == replies, "Engineer could access the reviewer deadline list");
-
-        String revisedDeadline = tomorrow.atTime(19, 0).format(DateTimeFormatter.ofPattern("dd.MM.uuuu HH:mm"));
-        bot.handle(message(134, SECOND_ENGINEER,
-            Map.of("text", "/deadline " + revisedDeadline + " " + ENGINEER + " north")));
-        check(telegram.lastText(SECOND_ENGINEER).contains("Задать срок сдачи") && store.missingDeadlines().equals(deadlines),
-            "The typed command bypassed the deadline picker");
-        pressDeadlineButton(bot, 135, SECOND_ENGINEER, confirmation, "Подтвердить");
-        check(store.missingDeadlines().equals(deadlines), "Repeating confirmation changed the saved deadline");
-
-        bot.handle(message(136, ENGINEER, Map.of("text", "/missing")));
-        check(telegram.lastText(ENGINEER).contains("Южный объект"), "Dual role could not see employee deadlines");
-        bot.handle(message(137, ENGINEER, Map.of("text", "/deadline")));
-        var newChoices = telegram.lastMessage(ENGINEER);
-        check(deadlineButton(newChoices, "Южный объект").isEmpty(), "Dual role could set another engineer's deadline");
-        pressDeadlineButton(bot, 138, ENGINEER, newChoices, "Северный объект");
-        var northDates = telegram.deadlineStep(ENGINEER, newChoices.messageId());
-        pressDeadlineButton(bot, 139, ENGINEER, northDates, "Отмена");
-        var cancelled = telegram.deadlineStep(ENGINEER, newChoices.messageId());
-        check(cancelled.payload().path("text").asText().contains("отменена") && buttons(cancelled).isEmpty(),
-            "Cancelling a deadline picker left it active");
-        pressDeadlineButton(bot, 140, ENGINEER, northDates, "Завтра");
-        check(telegram.deadlineStep(ENGINEER, newChoices.messageId()).equals(cancelled)
-            && store.missingDeadlines().equals(deadlines), "An old date button changed the cancelled picker");
-    }
-
-    private static void pressDeadlineButton(TelegramReports bot, long updateId, long engineer, Call step, String label)
+    private static void checkLegacyVideoDraft(TelegramReports bot, MockTelegram telegram, TelegramReportStore store)
             throws Exception {
-        String action = deadlineButton(step, label);
-        check(action.startsWith("dl:"), "The deadline picker did not offer button " + label);
-        bot.handle(callback(updateId, engineer, engineer, step.messageId(), action));
-    }
+        bot.handle(message(120, ENGINEER, Map.of("text", "/deadline")));
+        check(store.draft(ENGINEER) == null && store.missingDeadlines().isEmpty()
+            && buttons(telegram.lastMessage(ENGINEER)).stream().noneMatch(action -> action.startsWith("dl:")),
+            "The old command still opened a deadline picker");
 
-    private static String deadlineButton(Call call, String label) {
-        for (var row : call.payload().path("reply_markup").path("inline_keyboard")) {
-            for (var key : row) {
-                if (key.path("text").asText().contains(label)) return key.path("callback_data").asText();
-            }
-        }
-        return "";
+        long before = 14;
+        store.save(new TelegramReportStore.Draft(ENGINEER, "north", before, AFTER, null, List.of(DOCUMENT)));
+        bot.handle(message(121, ENGINEER, Map.of("text", "/start")));
+        var preview = telegram.lastMessage(ENGINEER);
+        check(preview.payload().path("text").asText().contains("Проверьте отчёт")
+            && preview.payload().path("text").asText().contains("✓ Видео после работ"),
+            "A video saved before the update could not be resumed");
+        bot.handle(callback(122, ENGINEER, button(preview, "send:")));
+        var report = store.pending();
+        check(report != null && report.before() == before && report.after() == AFTER
+            && report.documents().equals(List.of(DOCUMENT)), "Resuming the draft lost existing materials");
+        check(store.draft(ENGINEER) == null && !report.header().contains("Результат:"),
+            "A legacy video draft still required a separate result message");
+        int reviewCallsBefore = telegram.reviewCalls().size();
+        bot.deliver();
+        var delivered = telegram.reviewCalls().subList(reviewCallsBefore, telegram.reviewCalls().size());
+        check(delivered.size() == 4 && store.pending() == null, "Legacy report materials were not delivered");
+        checkCopy(delivered.get(0), before, 200, "Видео до");
+        checkCopy(delivered.get(1), AFTER, 200, "Видео после");
+        checkCopy(delivered.get(2), DOCUMENT, 200, "Вложение 1");
     }
 
     private static boolean editTargets(Call edit, Call message) {
@@ -511,7 +437,7 @@ final class TelegramReportsCheck {
     private static final class MockTelegram implements AutoCloseable {
         private final HttpServer server;
         private final List<Call> calls = new CopyOnWriteArrayList<>();
-        private final AtomicBoolean failDocumentOnce = new AtomicBoolean(true);
+        private final AtomicBoolean failSummaryOnce = new AtomicBoolean(true);
         private final AtomicBoolean failCommandsOnce = new AtomicBoolean();
         private final AtomicLong messageIds = new AtomicLong(500);
 
@@ -527,8 +453,8 @@ final class TelegramReportsCheck {
             try (exchange) {
                 String method = exchange.getRequestURI().getPath().substring(("/bot" + TOKEN + "/").length());
                 var payload = Db.JSON.readTree(exchange.getRequestBody());
-                boolean fail = ("copyMessage".equals(method) && payload.path("message_id").asLong() == DOCUMENT
-                    && failDocumentOnce.getAndSet(false))
+                boolean fail = ("sendMessage".equals(method) && payload.path("chat_id").asLong() == REVIEW_CHAT
+                    && failSummaryOnce.getAndSet(false))
                     || ("setMyCommands".equals(method) && failCommandsOnce.getAndSet(false));
                 int status = fail ? 500 : 200;
                 long messageId = switch (method) {
@@ -576,11 +502,6 @@ final class TelegramReportsCheck {
         }
 
         Call lastMessage(long user) { return messages(user).getLast(); }
-
-        Call deadlineStep(long user, long messageId) {
-            return calls.stream().filter(call -> "editMessageText".equals(call.method())
-                && call.payload().path("chat_id").asLong() == user && call.messageId() == messageId).toList().getLast();
-        }
 
         String lastText(long user) { return lastMessage(user).payload().path("text").asText(); }
 

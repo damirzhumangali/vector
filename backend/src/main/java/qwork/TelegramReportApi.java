@@ -72,13 +72,8 @@ final class TelegramReportApi implements AutoCloseable {
     }
 
     void edit(long chatId, long messageId, String text) throws IOException, InterruptedException {
-        edit(chatId, messageId, text, List.of());
-    }
-
-    void edit(long chatId, long messageId, String text, List<List<Map<String, String>>> keyboard)
-            throws IOException, InterruptedException {
         call("editMessageText", Map.of("chat_id", chatId, "message_id", messageId, "text", text,
-            "link_preview_options", Map.of("is_disabled", true), "reply_markup", Map.of("inline_keyboard", keyboard)),
+            "link_preview_options", Map.of("is_disabled", true), "reply_markup", Map.of("inline_keyboard", List.of())),
             Duration.ofSeconds(10));
     }
 

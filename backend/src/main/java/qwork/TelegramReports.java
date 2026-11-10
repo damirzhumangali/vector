@@ -10,6 +10,7 @@ import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -21,12 +22,12 @@ final class TelegramReports {
     private static final int MAX_REASON_LENGTH = 500;
     private static final int SITE_CHOICES = 8;
     private static final int DEADLINE_PAGE_SIZE = 10;
-    static final ZoneId ZONE = ZoneId.of("Asia/Almaty");
+    private static final ZoneId ZONE = ZoneId.of("Asia/Almaty");
     private static final DateTimeFormatter DATE = DateTimeFormatter.ofPattern("dd.MM.uuuu HH:mm XXX");
     private static final DateTimeFormatter DEADLINE_DATE =
         DateTimeFormatter.ofPattern("dd.MM.uuuu HH:mm");
-    private static final String DEADLINE_HELP = "В меню выберите «Задать срок сдачи», затем объект, дату и время.";
-    private static final String MISSING_HELP = "В меню «Посмотреть несданные отчёты» видны сроки, которые выбрали сотрудники.";
+    private static final String REPORT_HELP = "Нажмите «Добавить отчёт», выберите объект и пришлите видео после работ.";
+    private static final String MISSING_HELP = "В меню «Посмотреть несданные отчёты» видны объекты без видеоотчёта.";
     private static final List<List<Map<String, String>>> MENU = List.of(List.of(button("Добавить отчёт", "new")));
     private static final List<Map<String, String>> COMMON_COMMANDS = List.of(
         command("start", "Открыть бота"),
@@ -36,18 +37,11 @@ final class TelegramReports {
     private final TelegramReportCatalog catalog;
     private final TelegramReportStore store;
     private final TelegramReportApi api;
-    private final TelegramReportDeadlineMenu deadlineMenu;
 
     TelegramReports(TelegramReportCatalog catalog, TelegramReportStore store, TelegramReportApi api) {
-        this(catalog, store, api, new TelegramReportDeadlineMenu(catalog, api));
-    }
-
-    TelegramReports(TelegramReportCatalog catalog, TelegramReportStore store, TelegramReportApi api,
-                    TelegramReportDeadlineMenu deadlineMenu) {
         this.catalog = catalog;
         this.store = store;
         this.api = api;
-        this.deadlineMenu = deadlineMenu;
     }
 
     public static void main(String[] args) {
@@ -113,7 +107,6 @@ final class TelegramReports {
         if (catalog.engineers().containsKey(user)) {
             commands.add(command("new", "Добавить или продолжить отчёт"));
             commands.add(command("cancel", "Отменить черновик"));
-            commands.add(command("deadline", "Задать срок сдачи"));
         }
         if (catalog.reviewers().containsKey(user)) {
             commands.add(command("missing", "Посмотреть несданные отчёты"));
@@ -208,8 +201,7 @@ final class TelegramReports {
         if (!"private".equals(chatType) || chatId != engineer) return;
 
         if (callback.isObject() && callback.path("data").asText().startsWith("dl:")) {
-            if (catalog.engineers().containsKey(engineer)) deadlineMenu.handle(engineer, callback, store);
-            else answer(callback, "Срок сдачи выбирает сотрудник для своего объекта.");
+            answer(callback, REPORT_HELP);
             return;
         }
 
@@ -221,7 +213,7 @@ final class TelegramReports {
             reply(engineer, "Ваш Telegram ID: " + engineer + ". Его можно передать администратору для доступа.");
             return;
         }
-        if (!callback.isObject() && handleDeadlineCommand(engineer, text, update.path("update_id").asLong())) return;
+        if (!callback.isObject() && handleReportCommand(engineer, text)) return;
         if (!catalog.engineers().containsKey(engineer)) {
             if ("/start".equals(text) || "/help".equals(text)) {
                 if (catalog.reviewers().containsKey(engineer)) {
@@ -254,9 +246,8 @@ final class TelegramReports {
         switch (text) {
             case "/start", "/new" -> start(engineer, draft);
             case "/help" -> {
-                if (draft == null) api.send(engineer, "TMS Report — отчёты по обслуживанию СКУД. Выберите объект, "
-                    + "отправьте видео после работ и опишите результат.\n\n"
-                    + "К незавершённому отчёту можно вернуться командой /start.\n\n" + DEADLINE_HELP
+                if (draft == null) api.send(engineer, "TMS Report — отчёты по обслуживанию СКУД.\n\n"
+                    + REPORT_HELP + "\n\nК незавершённому отчёту можно вернуться командой /start."
                     + (catalog.reviewers().containsKey(engineer) ? "\n\n" + MISSING_HELP : ""), MENU);
                 else prompt(draft);
             }
@@ -272,22 +263,18 @@ final class TelegramReports {
             default -> {
                 if (text.startsWith("/")) reply(engineer, "Доступные команды: /start, /new, /cancel, /id.");
                 else if (draft == null) api.send(engineer, "Нажмите «Добавить отчёт», чтобы начать.", MENU);
-                else accept(draft, message, text);
+                else accept(draft, message, text, update.path("update_id").asLong());
             }
         }
     }
 
-    private boolean handleDeadlineCommand(long user, String text, long updateId) throws Exception {
+    private boolean handleReportCommand(long user, String text) throws Exception {
         if (!text.startsWith("/")) return false;
         String[] args = text.split("\\s+");
         switch (args[0]) {
             case "/deadline" -> {
-                if (catalog.engineers().containsKey(user)) {
-                    if (args.length == 1) deadlineMenu.open(user, updateId);
-                    else reply(user, DEADLINE_HELP);
-                } else if (catalog.reviewers().containsKey(user)) {
-                    reply(user, "Срок сдачи выбирает сотрудник для своего объекта.");
-                }
+                if (catalog.engineers().containsKey(user)) api.send(user, REPORT_HELP, MENU);
+                else if (catalog.reviewers().containsKey(user)) reply(user, MISSING_HELP);
             }
             case "/missing" -> {
                 if (catalog.reviewers().containsKey(user)) showMissing(user, args);
@@ -303,30 +290,44 @@ final class TelegramReports {
             reply(reviewer, "Введите /missing или /missing 2 для второй страницы.");
             return;
         }
-        var deadlines = store.missingDeadlines().stream().filter(this::isAssigned).toList();
-        if (deadlines.isEmpty()) {
-            reply(reviewer, "Нет ожидаемых отчётов. Здесь появятся сроки, которые выберут сотрудники.");
+        long now = Instant.now().getEpochSecond();
+        var reported = new HashSet<>(store.reportedAssignments());
+        var missing = new ArrayList<String>();
+        for (var deadline : store.missingDeadlines()) {
+            if (!isAssigned(deadline)) continue;
+            reported.add(new TelegramReportStore.DeadlineAssignment(deadline.engineerId(), deadline.siteId()));
+            String status = (deadline.dueAt() <= now ? "Просрочен с " : "Ожидается до ")
+                + formatDeadline(deadline.dueAt());
+            missing.add(missingLine(deadline.engineerId(), deadline.siteId(), status));
+        }
+        for (long engineer : catalog.engineers().keySet().stream().sorted().toList()) {
+            for (var site : catalog.search(engineer, "")) {
+                if (!reported.contains(new TelegramReportStore.DeadlineAssignment(engineer, site.id()))) {
+                    missing.add(missingLine(engineer, site.id(), "Видеоотчёт ещё не отправлен"));
+                }
+            }
+        }
+        if (missing.isEmpty()) {
+            reply(reviewer, "Нет ожидаемых отчётов.");
             return;
         }
-        int pages = (deadlines.size() - 1) / DEADLINE_PAGE_SIZE + 1;
+        int pages = (missing.size() - 1) / DEADLINE_PAGE_SIZE + 1;
         if (page > pages) {
             reply(reviewer, "Такой страницы нет. Начните с /missing.");
             return;
         }
         int first = ((int) page - 1) * DEADLINE_PAGE_SIZE;
-        long now = Instant.now().getEpochSecond();
-        var result = new StringBuilder("Объекты без отчёта · ").append(deadlines.size()).append('\n');
-        for (var deadline : deadlines.subList(first, Math.min(first + DEADLINE_PAGE_SIZE, deadlines.size()))) {
-            result.append("\n• ").append(catalog.site(deadline.siteId()).label()).append('\n')
-                .append(catalog.engineers().get(deadline.engineerId())).append(" · ")
-                .append(deadline.dueAt() <= now ? "Просрочен с " : "Ожидается до ")
-                .append(formatDeadline(deadline.dueAt())).append('\n');
-        }
+        var result = new StringBuilder("Объекты без отчёта · ").append(missing.size()).append('\n');
+        missing.subList(first, Math.min(first + DEADLINE_PAGE_SIZE, missing.size())).forEach(result::append);
         if (pages > 1) {
             result.append("\nСтраница ").append(page).append(" из ").append(pages);
             if (page < pages) result.append(" · Далее /missing ").append(page + 1);
         }
         reply(reviewer, result.toString());
+    }
+
+    private String missingLine(long engineer, String siteId, String status) {
+        return "\n• " + siteLabel(siteId) + "\n" + catalog.engineers().get(engineer) + " · " + status + "\n";
     }
 
     long nextReminderAt() throws Exception {
@@ -383,7 +384,7 @@ final class TelegramReports {
         return catalog.site(deadline.engineerId(), deadline.siteId()) != null;
     }
 
-    static String formatDeadline(long time) {
+    private static String formatDeadline(long time) {
         return DEADLINE_DATE.format(Instant.ofEpochSecond(time).atZone(ZONE));
     }
 
@@ -449,10 +450,6 @@ final class TelegramReports {
     }
 
     private void answer(JsonNode callback, String text) throws IOException, InterruptedException {
-        answer(api, callback, text);
-    }
-
-    static void answer(TelegramReportApi api, JsonNode callback, String text) throws IOException, InterruptedException {
         String id = callback.path("id").asText();
         try {
             if (text == null) api.answer(id);
@@ -483,7 +480,7 @@ final class TelegramReports {
     }
 
     private void showSites(long engineer, String query, long page) throws Exception {
-        String heading = "1 из 4 · Выберите свой объект";
+        String heading = "Выберите свой объект";
         var sites = catalog.search(engineer, query);
         if (sites.isEmpty()) {
             reply(engineer, query.isBlank() || catalog.search(engineer, "").isEmpty()
@@ -527,18 +524,16 @@ final class TelegramReports {
         if (!assigned(draft)) return;
         if (draft.siteId() == null) showSites(draft.engineerId(), "", 0);
         else if (draft.after() == null) promptVideo(draft, "");
-        else if (draft.result() == null) reply(draft.engineerId(), "3 из 4 · Опишите результат\n"
-            + "Видео после работ получено. Напишите, что сделали и что проверили.\n\n"
-            + "Например: «Заменили считыватель. Проверили проход по карте».");
+        else if (requiresRevisionText(draft)) reply(draft.engineerId(), "Напишите исправленный комментарий к отчёту.");
         else preview(draft);
     }
 
     private void promptVideo(TelegramReportStore.Draft draft, String feedback) throws Exception {
-        reply(draft.engineerId(), "2 из 4 · Видео после работ\nОбъект: " + siteLabel(draft.siteId()) + "\n" + feedback
+        reply(draft.engineerId(), "Видео после работ\nОбъект: " + siteLabel(draft.siteId()) + "\n" + feedback
             + "Пришлите одно видео после работ. Покажите, как работает система после обслуживания.");
     }
 
-    private void accept(TelegramReportStore.Draft draft, JsonNode message, String text) throws Exception {
+    private void accept(TelegramReportStore.Draft draft, JsonNode message, String text, long updateId) throws Exception {
         long engineer = draft.engineerId();
         if (!assigned(draft)) return;
         if (draft.siteId() == null) {
@@ -560,17 +555,18 @@ final class TelegramReports {
                 promptVideo(draft, "На этом шаге нужен видеоролик.\n");
                 return;
             }
-            draft = new TelegramReportStore.Draft(engineer, draft.siteId(), draft.before(), messageId, null, draft.documents());
-            store.save(draft);
-        } else if (draft.result() == null) {
-            if (text.length() > MAX_RESULT_LENGTH) {
-                reply(engineer, "Сократите результат до " + MAX_RESULT_LENGTH + " символов.");
+            String caption = message.path("caption").asText("").strip();
+            if (caption.length() > MAX_RESULT_LENGTH) {
+                promptVideo(draft, "Сократите подпись до " + MAX_RESULT_LENGTH + " символов.\n");
                 return;
             }
-            if (!text.isEmpty()) {
-                draft = new TelegramReportStore.Draft(engineer, draft.siteId(), draft.before(), draft.after(), text, draft.documents());
-                store.save(draft);
+            String result = caption.isEmpty() && draft.result() != null ? draft.result() : caption;
+            draft = new TelegramReportStore.Draft(engineer, draft.siteId(), draft.before(), messageId, result, draft.documents());
+            if (store.revisionSource(engineer) == null) {
+                queueReport(draft, updateId);
+                return;
             }
+            store.save(draft);
         } else if (video) {
             reply(engineer, "Видео после работ уже сохранено. К отчёту можно добавить фото или документы.");
             return;
@@ -583,16 +579,23 @@ final class TelegramReports {
                 draft = new TelegramReportStore.Draft(engineer, draft.siteId(), draft.before(), draft.after(), draft.result(), docs);
                 store.save(draft);
             }
+        } else if (!text.isEmpty()) {
+            if (text.length() > MAX_RESULT_LENGTH) {
+                reply(engineer, "Сократите результат до " + MAX_RESULT_LENGTH + " символов.");
+                return;
+            }
+            draft = new TelegramReportStore.Draft(engineer, draft.siteId(), draft.before(), draft.after(), text, draft.documents());
+            store.save(draft);
         }
         prompt(draft);
     }
 
     private void preview(TelegramReportStore.Draft draft) throws Exception {
         String savedBefore = draft.before() == null ? "" : "✓ Видео до работ (сохранено ранее)\n";
-        api.send(draft.engineerId(), "4 из 4 · Проверьте отчёт\n\n" + summary(draft)
+        api.send(draft.engineerId(), "Проверьте отчёт\n\n" + summary(draft)
             + "\n\n" + savedBefore + "✓ Видео после работ\nДополнительных вложений: "
             + draft.documents().size() + " из " + MAX_DOCUMENTS
-            + "\n\nМожно добавить фото или документы. Кнопка «Отправить отчёт» передаст материалы в чат проверки.",
+            + "\n\nМожно добавить комментарий, фото или документы. Кнопка «Отправить отчёт» передаст материалы в чат проверки.",
             List.of(List.of(button("Отправить отчёт", sendAction(draft)))));
     }
 
@@ -604,7 +607,7 @@ final class TelegramReports {
     private String summary(TelegramReportStore.Draft draft) {
         return "Объект: " + siteLabel(draft.siteId())
             + "\nИнженер: " + catalog.engineers().get(draft.engineerId())
-            + "\n\nРезультат: " + draft.result();
+            + (draft.result() == null || draft.result().isBlank() ? "" : "\n\nРезультат: " + draft.result());
     }
 
     private String siteLabel(String siteId) {
@@ -625,13 +628,21 @@ final class TelegramReports {
             return;
         }
         if (!assigned(draft)) return;
-        if (draft.siteId() == null || draft.after() == null || draft.result() == null) {
+        if (draft.siteId() == null || draft.after() == null || requiresRevisionText(draft)) {
             prompt(draft);
             return;
         }
-        String created = currentTime();
-        var number = store.queue(draft, catalog.reviewChatId(), summary(draft) + "\n\nОтправлено: " + created, created, updateId);
+        var number = queueReport(draft, updateId);
         reply(engineer, number.label() + " принят к отправке. Бот сообщит, когда материалы появятся в чате проверки.");
+    }
+
+    private TelegramReportStore.ReportNumber queueReport(TelegramReportStore.Draft draft, long updateId) throws Exception {
+        String created = currentTime();
+        return store.queue(draft, catalog.reviewChatId(), summary(draft) + "\n\nОтправлено: " + created, created, updateId);
+    }
+
+    private boolean requiresRevisionText(TelegramReportStore.Draft draft) throws Exception {
+        return draft.result() == null && store.revisionSource(draft.engineerId()) != null;
     }
 
     private static String currentTime() {
@@ -724,7 +735,7 @@ final class TelegramReports {
         return error.status() == 400 || error.status() == 403;
     }
 
-    static Map<String, String> button(String label, String action) {
+    private static Map<String, String> button(String label, String action) {
         return Map.of("text", label, "callback_data", action);
     }
 }

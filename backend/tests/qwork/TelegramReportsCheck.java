@@ -59,6 +59,7 @@ final class TelegramReportsCheck {
             check("getUpdates".equals(poll.method()) && poll.payload().path("offset").asLong() == 42,
                 "Long polling omitted the saved offset");
             check(poll.payload().path("timeout").asInt() > 0, "Polling does not wait for updates");
+            checkCommandMenus(catalog, api, telegram);
 
             try (var store = new TelegramReportStore(database)) {
                 var bot = new TelegramReports(catalog, store, api);
@@ -98,9 +99,28 @@ final class TelegramReportsCheck {
         System.out.println("Telegram report workflow passed.");
     }
 
+    private static void checkCommandMenus(TelegramReportCatalog catalog, TelegramReportApi api, MockTelegram telegram)
+            throws Exception {
+        var reviewers = new LinkedHashMap<>(catalog.reviewers());
+        reviewers.put(ENGINEER, catalog.engineers().get(ENGINEER));
+        var roles = new TelegramReportCatalog(catalog.reviewChatId(), catalog.engineers(), catalog.sites(),
+            reviewers, catalog.assignments());
+        TelegramReports.syncCommandMenus(roles, api);
+        check("all_private_chats".equals(telegram.calls.get(1).payload().path("scope").path("type").asText())
+            && telegram.menu(null).equals(List.of("start", "help", "id")), "Fallback menu exposed work commands");
+        check(telegram.menu(SECOND_ENGINEER).equals(List.of("new", "cancel", "start", "help", "id")),
+            "Engineer menu did not contain only its allowed work commands");
+        check(telegram.menu(REVIEWER).equals(List.of("missing", "deadline", "start", "help", "id")),
+            "Reviewer menu did not contain only its allowed work commands");
+        check(telegram.menu(ENGINEER).equals(List.of("new", "cancel", "missing", "deadline", "start", "help", "id")),
+            "An engineer who also reviews reports did not receive both sets of commands");
+    }
+
     private static void checkAccess(TelegramReports bot, MockTelegram telegram, TelegramReportStore store) throws Exception {
         bot.handle(message(1, STRANGER, Map.of("text", "/start")));
         check(telegram.lastText(STRANGER).contains("список инженеров"), "Unauthorized user did not get access guidance");
+        check(telegram.menu(STRANGER).equals(List.of("start", "help", "id")),
+            "Start did not replace a potentially stale role-specific menu");
         int responses = telegram.calls.size();
         bot.handle(message(2, STRANGER, Map.of("text", "/new")));
         bot.handle(callback(3, STRANGER, "new"));
@@ -110,6 +130,7 @@ final class TelegramReportsCheck {
     }
 
     private static void queueReport(TelegramReports bot, MockTelegram telegram, TelegramReportStore store) throws Exception {
+        telegram.failCommandsOnce.set(true);
         bot.handle(message(5, ENGINEER, Map.of("text", "/start")));
         check(buttons(telegram.lastMessage(ENGINEER)).equals(List.of("site:north"))
             && telegram.lastText(ENGINEER).contains("1 из 4"), "Start did not list only the engineer's assigned object");
@@ -298,6 +319,9 @@ final class TelegramReportsCheck {
         check(telegram.calls.size() == before && bot.nextReminderAt() == Long.MAX_VALUE,
             "An unauthorized user accessed report deadlines");
 
+        bot.handle(message(99, REVIEWER, Map.of("text", "/deadline")));
+        check(telegram.lastText(REVIEWER).contains("Например, /deadline") && bot.nextReminderAt() == Long.MAX_VALUE,
+            "Selecting the deadline menu command did not show help without setting a deadline");
         bot.handle(message(102, REVIEWER, Map.of("text", deadline)));
         bot.handle(message(103, REVIEWER, Map.of("text", "/missing")));
         check(telegram.lastText(REVIEWER).contains("Северный объект")
@@ -382,6 +406,7 @@ final class TelegramReportsCheck {
         private final HttpServer server;
         private final List<Call> calls = new CopyOnWriteArrayList<>();
         private final AtomicBoolean failDocumentOnce = new AtomicBoolean(true);
+        private final AtomicBoolean failCommandsOnce = new AtomicBoolean();
         private final AtomicLong messageIds = new AtomicLong(500);
 
         MockTelegram() throws IOException {
@@ -396,8 +421,9 @@ final class TelegramReportsCheck {
             try (exchange) {
                 String method = exchange.getRequestURI().getPath().substring(("/bot" + TOKEN + "/").length());
                 var payload = Db.JSON.readTree(exchange.getRequestBody());
-                boolean fail = "copyMessage".equals(method) && payload.path("message_id").asLong() == DOCUMENT
-                    && failDocumentOnce.getAndSet(false);
+                boolean fail = ("copyMessage".equals(method) && payload.path("message_id").asLong() == DOCUMENT
+                    && failDocumentOnce.getAndSet(false))
+                    || ("setMyCommands".equals(method) && failCommandsOnce.getAndSet(false));
                 int status = fail ? 500 : 200;
                 long messageId = switch (method) {
                     case "sendMessage", "copyMessage" -> fail ? 0 : messageIds.incrementAndGet();
@@ -407,7 +433,7 @@ final class TelegramReportsCheck {
                 calls.add(new Call(method, payload, status, messageId));
                 Object result = switch (method) {
                     case "getUpdates" -> List.of();
-                    case "answerCallbackQuery" -> true;
+                    case "answerCallbackQuery", "setMyCommands" -> true;
                     default -> Map.of("message_id", messageId);
                 };
                 var data = Db.JSON.writeValueAsBytes(fail
@@ -420,6 +446,18 @@ final class TelegramReportsCheck {
 
         List<Call> reviewCalls() {
             return calls.stream().filter(call -> call.payload().path("chat_id").asLong() == REVIEW_CHAT).toList();
+        }
+
+        List<String> menu(Long user) {
+            var matching = calls.stream().filter(call -> "setMyCommands".equals(call.method()))
+                .filter(call -> user == null
+                    ? "all_private_chats".equals(call.payload().path("scope").path("type").asText())
+                    : "chat".equals(call.payload().path("scope").path("type").asText())
+                        && call.payload().path("scope").path("chat_id").asLong() == user)
+                .toList();
+            var commands = new ArrayList<String>();
+            matching.getLast().payload().path("commands").forEach(command -> commands.add(command.path("command").asText()));
+            return commands;
         }
 
         List<Call> messages(long user) {

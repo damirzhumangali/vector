@@ -38,6 +38,7 @@ final class TelegramReportWebhook implements AutoCloseable {
     private final TelegramReportCatalog catalog;
     private final TelegramReportApi api;
     private final boolean remindersEnabled;
+    private Thread commandMenuSetup;
     private ScheduledFuture<?> reminderWake;
     private long reminderWakeAt = Long.MAX_VALUE;
     private long reminderRetryAt;
@@ -96,6 +97,7 @@ final class TelegramReportWebhook implements AutoCloseable {
         app.server.start();
         if (app.remindersEnabled) app.armReminder(Instant.now().getEpochSecond() + REMINDER_RETRY_SECONDS);
         app.wake();
+        app.commandMenuSetup = TelegramReports.startCommandMenuSetup(catalog, api);
         return app;
     }
 
@@ -308,6 +310,7 @@ final class TelegramReportWebhook implements AutoCloseable {
             closed = true;
         }
         server.stop(1);
+        commandMenuSetup.interrupt();
         requests.shutdownNow();
         worker.shutdownNow();
     }

@@ -44,6 +44,14 @@ final class TelegramReportApi implements AutoCloseable {
         return updates;
     }
 
+    void setCommands(Long chatId, List<Map<String, String>> commands) throws IOException, InterruptedException {
+        var scope = chatId == null ? Map.of("type", "all_private_chats") : Map.of("type", "chat", "chat_id", chatId);
+        var result = call("setMyCommands", Map.of("commands", commands, "scope", scope), Duration.ofSeconds(10));
+        if (!result.isBoolean() || !result.booleanValue()) {
+            throw new IOException("Telegram не подтвердил обновление команд бота.");
+        }
+    }
+
     long send(long chatId, String text, List<List<Map<String, String>>> keyboard)
             throws IOException, InterruptedException {
         var fields = new LinkedHashMap<String, Object>();

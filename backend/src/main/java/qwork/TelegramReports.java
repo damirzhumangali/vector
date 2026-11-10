@@ -14,6 +14,7 @@ import java.time.format.ResolverStyle;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 
@@ -32,6 +33,10 @@ final class TelegramReports {
         + "Для одного сотрудника добавьте его Telegram ID после времени. "
         + "Для одного объекта добавьте ещё его код. /missing покажет, по каким объектам отчётов пока нет.";
     private static final List<List<Map<String, String>>> MENU = List.of(List.of(button("Добавить отчёт", "new")));
+    private static final List<Map<String, String>> COMMON_COMMANDS = List.of(
+        command("start", "Открыть бота"),
+        command("help", "Как пользоваться ботом"),
+        command("id", "Узнать свой Telegram ID"));
 
     private final TelegramReportCatalog catalog;
     private final TelegramReportStore store;
@@ -58,7 +63,12 @@ final class TelegramReports {
                  var store = new TelegramReportStore(Path.of(System.getenv().getOrDefault(
                      "QWORK_TELEGRAM_DB", "data/telegram-reports.sqlite3")))) {
                 System.out.println("TMS Report: ожидание сообщений Telegram.");
-                new TelegramReports(config, store, api).run();
+                var menus = startCommandMenuSetup(config, api);
+                try {
+                    new TelegramReports(config, store, api).run();
+                } finally {
+                    menus.interrupt();
+                }
             }
         } catch (InterruptedException stop) {
             Thread.currentThread().interrupt();
@@ -72,6 +82,61 @@ final class TelegramReports {
             System.err.println("TMS Report не запущен или остановился: " + error.getClass().getSimpleName());
             System.exit(1);
         }
+    }
+
+    static Thread startCommandMenuSetup(TelegramReportCatalog catalog, TelegramReportApi api) {
+        return Thread.ofVirtual().name("telegram-command-menu").start(() -> {
+            try {
+                syncCommandMenus(catalog, api);
+            } catch (InterruptedException stopping) {
+                Thread.currentThread().interrupt();
+            }
+        });
+    }
+
+    static void syncCommandMenus(TelegramReportCatalog catalog, TelegramReportApi api) throws InterruptedException {
+        updateCommands(api, null, COMMON_COMMANDS);
+        var users = new LinkedHashSet<>(catalog.reviewers().keySet());
+        users.addAll(catalog.engineers().keySet());
+        int updated = 0;
+        for (long user : users) {
+            if (updateCommands(api, user, commandsFor(catalog, user))) updated++;
+        }
+        System.out.println("TMS Report: меню Telegram обновлено для " + updated + " из " + users.size()
+            + " рабочих чатов.");
+    }
+
+    private static List<Map<String, String>> commandsFor(TelegramReportCatalog catalog, long user) {
+        var commands = new ArrayList<Map<String, String>>();
+        if (catalog.engineers().containsKey(user)) {
+            commands.add(command("new", "Добавить или продолжить отчёт"));
+            commands.add(command("cancel", "Отменить черновик"));
+        }
+        if (catalog.reviewers().containsKey(user)) {
+            commands.add(command("missing", "Посмотреть несданные отчёты"));
+            commands.add(command("deadline", "Задать срок сдачи"));
+        }
+        commands.addAll(COMMON_COMMANDS);
+        return commands;
+    }
+
+    private static boolean updateCommands(TelegramReportApi api, Long user, List<Map<String, String>> commands)
+            throws InterruptedException {
+        try {
+            api.setCommands(user, commands);
+            return true;
+        } catch (TelegramReportApi.ApiFailure failure) {
+            if (!rejected(failure)) {
+                System.err.println("TMS Report: Telegram не обновил меню (" + failure.status() + ").");
+            }
+        } catch (IOException failure) {
+            System.err.println("TMS Report: не удалось обновить меню Telegram.");
+        }
+        return false;
+    }
+
+    private static Map<String, String> command(String name, String description) {
+        return Map.of("command", name, "description", description);
     }
 
     private static void printSetupIds(List<JsonNode> updates) {
@@ -141,6 +206,9 @@ final class TelegramReports {
         if (!"private".equals(chatType) || chatId != engineer) return;
 
         String text = message.path("text").asText("").strip();
+        if ("/start".equals(text) && !callback.isObject()) {
+            updateCommands(api, engineer, commandsFor(catalog, engineer));
+        }
         if ("/id".equals(text) && !callback.isObject()) {
             reply(engineer, "Ваш Telegram ID: " + engineer + ". Его можно передать администратору для доступа.");
             return;
@@ -152,7 +220,7 @@ final class TelegramReports {
                 if (catalog.reviewers().containsKey(engineer)) {
                     reply(engineer, "Проверяйте отчёты в группе проверки. Нажмите «Принять» или «На доработку». "
                         + "Для доработки ответьте на сообщение бота с просьбой указать причину.\n\n" + DEADLINE_HELP);
-                } else if ("/start".equals(text)) {
+                } else {
                     reply(engineer, "Попросите администратора добавить вас в список инженеров. Узнать свой ID: /id.");
                 }
             }
@@ -215,7 +283,8 @@ final class TelegramReports {
 
     private void setDeadline(long reviewer, String[] args, long updateId) throws Exception {
         if (args.length < 3 || args.length > 5) {
-            reply(reviewer, DEADLINE_HELP);
+            String tomorrow = DEADLINE_DATE.format(LocalDateTime.now(ZONE).toLocalDate().plusDays(1).atTime(18, 0));
+            reply(reviewer, DEADLINE_HELP + "\n\nНапример, /deadline " + tomorrow);
             return;
         }
         long now = Instant.now().getEpochSecond();

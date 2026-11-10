@@ -30,6 +30,10 @@ export function splitTripDestination(destination) {
   return city ? { city, name: destination.slice(city.length + separator.length) } : { name: destination };
 }
 
+export function organizationKey(name) {
+  return name.normalize('NFC').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
 export const KURMANGAZY_DESTINATIONS = [
   'Аппарат акима сельского округа Курмангазы',
   'Отдел строительства',

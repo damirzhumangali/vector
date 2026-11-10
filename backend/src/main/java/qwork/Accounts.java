@@ -27,7 +27,7 @@ final class Accounts {
     private static final int HASH_ROUNDS = 600_000;
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final byte[] DUMMY_SALT = new byte[16];
-    private static final Set<String> ROLES = Set.of("employee", "dispatcher", "manager");
+    private static final Set<String> ROLES = Set.of("employee", "dispatcher", "manager", "accountant");
     private static final Pattern EMAIL = Pattern.compile("[^\\s@]+@[^\\s@]+\\.[^\\s@]+", Pattern.UNICODE_CHARACTER_CLASS);
     private static final Pattern STAFF_LOGIN = Pattern.compile("[a-zA-Z0-9._-]{3,40}");
     private static final Pattern TOKEN = Pattern.compile("[a-zA-Z0-9_-]{43}");
@@ -316,6 +316,10 @@ final class Accounts {
     static boolean isManager(Map<String, Object> user) {
         Object role = user.get("role");
         return "manager".equals(role) || "dispatcher".equals(role);
+    }
+
+    static boolean isAccountant(Map<String, Object> user) {
+        return "accountant".equals(user.get("role"));
     }
 
     static void requireManager(Map<String, Object> user) {

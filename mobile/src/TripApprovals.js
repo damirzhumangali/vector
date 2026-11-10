@@ -6,8 +6,18 @@ import { colors } from './ui';
 
 const labels = { approved: 'Согласовано', rejected: 'Отклонено', waiting: 'На рассмотрении', pending: 'Ожидает своей очереди' };
 const dateFormat = new Intl.DateTimeFormat('ru-RU', { dateStyle: 'medium', timeStyle: 'short' });
-const threeStageTemplate = ['Директор', 'Заместитель директора', 'Главный бухгалтер']
-  .map((title, index) => ({ position: index + 1, title }));
+const approvalRoles = [
+  { title: 'Директор' },
+  { title: 'Заместитель директора', suggestedName: 'Динара Ахметова' },
+  { title: 'Главный бухгалтер', suggestedName: 'Алия Нурпеисова' },
+];
+
+function suggestedApprover(choices, name) {
+  if (!name) return null;
+  const expected = name.toLocaleLowerCase('ru-RU');
+  const matches = choices.filter(choice => choice.label.trim().replace(/\s+/g, ' ').toLocaleLowerCase('ru-RU') === expected);
+  return matches.length === 1 ? matches[0].id : null;
+}
 
 function Card({ children, title }) {
   return <View style={styles.card}>
@@ -103,6 +113,7 @@ export function TripApprovalReview({ offer, request, employee = false, offline, 
       </Text>
       <Text style={styles.label}>Сотрудник</Text>
       <Text style={styles.body}>{current.employeeName}</Text>
+      {current.contractNumber ? <Text style={styles.muted}>Договор {current.contractNumber}</Text> : null}
       {current.address && current.address !== current.destination ? <Text style={styles.muted}>{current.address}</Text> : null}
       <Text style={styles.label}>Что нужно сделать</Text>
       <Text style={styles.body}>{current.purpose}</Text>
@@ -129,33 +140,24 @@ export function TripApprovalSettings({ settings, loadError, offline, request, on
   const [saved, setSaved] = useState(false);
   const lock = useRef(false);
   const stages = settings?.stages ?? [];
-  const supportsSingle = settings?.supportsSingleApprover === true;
-  const initialCount = supportsSingle && !settings.configured ? 1 : stages.length;
-  const count = draft?.length ?? initialCount;
-  const single = count === 1;
-  const original = count === stages.length
-    ? stages.map(stage => stage.approverId == null ? null : String(stage.approverId))
-    : Array(count).fill(null);
-  const selected = draft ?? original;
   const choices = (settings?.candidates ?? []).map(person => ({ id: String(person.id), label: person.name }));
-  const changed = !settings?.configured || count !== initialCount || original.some((value, index) => value !== selected[index]);
-  const valid = (single || count === 3) && selected.every(Boolean) && new Set(selected).size === count;
-  const canSave = settings?.canEdit && changed && valid && !busy && !offline;
-  const canSwitch = supportsSingle && settings.canEdit && (!single || choices.length >= 3 || initialCount === 3);
-  const displayedStages = stages.length === 3 ? stages : threeStageTemplate;
+  const original = approvalRoles.map((role, index) => {
+    const id = stages[index]?.approverId;
+    return id == null ? suggestedApprover(choices, role.suggestedName) : String(id);
+  });
+  const selected = draft ?? original;
+  const allAssigned = selected.every(Boolean) && new Set(selected).size === approvalRoles.length;
+  const savedThreeStages = settings?.configured && stages.length === approvalRoles.length;
+  const otherRoleChanged = draft?.slice(1).some((id, index) => id !== original[index + 1]);
+  const directorOnly = settings?.supportsSingleApprover === true && !savedThreeStages && !allAssigned && !otherRoleChanged;
+  const canSave = settings?.canEdit && draft !== null && (allAssigned || (directorOnly && selected[0]))
+    && !busy && !offline;
 
   function select(index, id) {
     setDraft(selected.map((value, position) => {
       if (position === index) return id;
       return value === id ? selected[index] : value;
     }));
-    setError('');
-    setSaved(false);
-  }
-
-  function switchCount() {
-    const nextCount = single ? 3 : 1;
-    setDraft(nextCount === initialCount ? null : Array(nextCount).fill(null));
     setError('');
     setSaved(false);
   }
@@ -167,7 +169,8 @@ export function TripApprovalSettings({ settings, loadError, offline, request, on
     setError('');
     setSaved(false);
     try {
-      const result = await request('/trip-approval-settings', { method: 'POST', body: { approverIds: selected } });
+      const approverIds = directorOnly ? selected.slice(0, 1) : selected;
+      const result = await request('/trip-approval-settings', { method: 'POST', body: { approverIds } });
       onSaved(result);
       setDraft(null);
       setSaved(true);
@@ -185,34 +188,28 @@ export function TripApprovalSettings({ settings, loadError, offline, request, on
       {!settings && !loadError && !offline && <Text style={styles.muted}>Загружаем маршрут согласования…</Text>}
       {offline && <Text style={styles.muted}>Для изменения настроек нужен интернет.</Text>}
       {settings && !settings.canEdit && <Text style={styles.muted}>Назначить ответственных может владелец компании.</Text>}
-      {settings && <Text style={styles.muted}>{single
-        ? 'Выбранный руководитель будет согласовывать новые командировки.'
-        : 'Командировки проходят три этапа по порядку. Изменения применяются к новым заявкам.'}</Text>}
-      {settings?.canEdit && !single && choices.length < 3 && <Text style={styles.muted}>
-        Для настройки нужны три разных руководителя с аккаунтами в компании.
-      </Text>}
-      {settings && single && (settings.canEdit ? <OptionPicker label="Выбрать согласующего" icon="user"
-        options={choices} selected={selected[0]} onSelect={id => select(0, id)} disabled={busy || offline}
-        empty="Нет доступных руководителей." /> : <Text style={styles.body}>
-        {settings.configured ? stages[0]?.approverName : 'Согласующий не назначен'}
-      </Text>)}
-      {settings && !single && displayedStages.map((stage, index) => <View key={stage.position} style={styles.stage}>
-        <View style={styles.marker}><Text style={styles.number}>{stage.position}</Text></View>
-        <View style={styles.stageText}>
-          <Text style={styles.label}>{stage.title}</Text>
-          {settings.canEdit ? <OptionPicker label={`Выбрать · ${stage.title}`} icon="user"
-            options={choices}
-            selected={selected[index]} onSelect={id => select(index, id)} disabled={busy || offline}
-            empty="Нет доступных руководителей." /> : <Text style={styles.body}>{stage.approverName || 'Не назначен'}</Text>}
-          {!selected[index] && stage.exampleName && <Text style={styles.muted}>Например, {stage.exampleName}</Text>}
-        </View>
-      </View>)}
+      {settings?.canEdit && !savedThreeStages && <Text style={styles.muted}>Выберите свой аккаунт в строке «Директор».</Text>}
+      {settings && approvalRoles.map((role, index) => {
+        const options = savedThreeStages ? choices : choices.filter(choice =>
+          !selected.some((id, position) => position !== index && id === choice.id));
+        const canChoose = settings.canEdit && (index === 0 || choices.length > 1);
+        const label = role.suggestedName ?? 'Выбрать директора';
+        return <View key={role.title} style={styles.stage}>
+          <View style={styles.marker}><Text style={styles.number}>{index + 1}</Text></View>
+          <View style={styles.stageText}>
+            <Text style={styles.label}>{role.title}</Text>
+            {canChoose ? <OptionPicker label={label} icon="user" options={options} selected={selected[index]}
+              onSelect={id => select(index, id)} disabled={busy || offline} empty="Нет доступных руководителей." />
+              : <Text style={styles.body}>{stages[index]?.approverName || role.suggestedName || 'Выберите директора'}</Text>}
+            {role.suggestedName && !selected[index] && <Text style={styles.muted}>Нужен аккаунт руководителя</Text>}
+          </View>
+        </View>;
+      })}
+      {settings && <Text style={styles.muted}>{directorOnly
+        ? 'Пока достаточно решения директора. Для трёх этапов нужны аккаунты заместителя и главного бухгалтера.'
+        : 'Для трёх этапов выберите аккаунт для каждой должности.'}</Text>}
       <ErrorMessage message={error || loadError} />
       {saved && <Text accessibilityLiveRegion="polite" style={styles.approved}>Маршрут сохранён.</Text>}
-      {canSwitch && <TripOfferAction disabled={busy || offline} onPress={switchCount}>
-        {single ? (initialCount === 3 ? 'Вернуться к трём этапам' : 'Настроить три этапа')
-          : (initialCount === 1 ? 'Вернуться к одному согласующему' : 'Перейти на одного согласующего')}
-      </TripOfferAction>}
       {settings?.canEdit && <TripOfferAction primary disabled={!canSave} onPress={save}>
         {busy ? 'Сохраняем…' : 'Сохранить согласование'}
       </TripOfferAction>}

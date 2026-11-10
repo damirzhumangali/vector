@@ -35,6 +35,7 @@ const OfficeScreens = vm.runInNewContext(`${code}\nOfficeScreens;`, {
   },
   useState,
   useRef: initial => useState({ current: initial })[0],
+  useCallback: callback => callback,
   useEffect() {},
   Keyboard: { dismiss() {} },
   Platform: { OS: 'ios' },

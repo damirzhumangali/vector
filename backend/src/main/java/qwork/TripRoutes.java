@@ -19,7 +19,7 @@ final class TripRoutes {
         CREATE TABLE IF NOT EXISTS work_trip_route_stops (
             id INTEGER PRIMARY KEY,
             offer_id INTEGER NOT NULL REFERENCES work_trip_offers(id),
-            position INTEGER NOT NULL CHECK (position BETWEEN 1 AND 30),
+            position INTEGER NOT NULL CHECK (position BETWEEN 1 AND 50),
             destination TEXT NOT NULL,
             planned_at TEXT,
             visited_at TEXT,

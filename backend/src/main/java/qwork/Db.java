@@ -34,8 +34,11 @@ final class Db {
         "0017_task_assignment_changes.sql", "0018_import_journal.sql", "0019_incident_push.sql",
         "0020_trip_budgets.sql", "0021_task_schedule.sql", "0022_trip_offers.sql",
         "0023_trip_offer_history.sql", "0024_trip_route.sql", "0025_trip_actual_expenses.sql",
-        "0026_trip_organizations.sql", "0027_unified_manager_role.sql", "0028_trip_approvals.sql"
+        "0026_trip_organizations.sql", "0027_unified_manager_role.sql", "0028_trip_approvals.sql",
+        "0029_contracts.sql", "0030_contract_payment_receipts.sql", "0031_accountant_role.sql", "0032_trip_contracts.sql"
     );
+    private static final String LEGACY_SQLITE_ROLE_CHECK = "CHECK (role IN ('employee', 'dispatcher', 'manager'))";
+    private static final String SQLITE_ROLE_CHECK = "CHECK (role IN ('employee', 'dispatcher', 'manager', 'accountant'))";
     private static final String SQLITE_SCHEMA = """
         CREATE TABLE IF NOT EXISTS companies (
             id INTEGER PRIMARY KEY, code TEXT NOT NULL UNIQUE, name TEXT NOT NULL
@@ -43,7 +46,7 @@ final class Db {
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY, company_id INTEGER NOT NULL REFERENCES companies(id),
             name TEXT NOT NULL, login TEXT NOT NULL,
-            role TEXT NOT NULL CHECK (role IN ('employee', 'dispatcher', 'manager')),
+            role TEXT NOT NULL %s,
             is_owner INTEGER NOT NULL DEFAULT 0, password_hash BLOB NOT NULL, password_salt BLOB NOT NULL,
             last_login_at TEXT, invite_hash BLOB, invite_expires_at INTEGER,
             invite_required INTEGER NOT NULL DEFAULT 0, UNIQUE (company_id, login)
@@ -81,7 +84,7 @@ final class Db {
             actor_name TEXT NOT NULL, created_at TEXT NOT NULL, reason TEXT NOT NULL, position TEXT
         );
         CREATE INDEX IF NOT EXISTS events_by_task ON task_events(task_id, id);
-        """;
+        """.formatted(SQLITE_ROLE_CHECK);
 
     private Db() {}
 
@@ -95,14 +98,18 @@ final class Db {
     }
 
     private static Connection openPostgres() throws SQLException {
+        return openPostgres(DATABASE_URL, "QWORK_DATABASE_URL");
+    }
+
+    static Connection openPostgres(String databaseUrl, String variableName) throws SQLException {
         Properties properties = new Properties();
         properties.setProperty("connectTimeout", "5");
-        if (DATABASE_URL.startsWith("jdbc:postgresql:")) {
-            return DriverManager.getConnection(DATABASE_URL, properties);
+        if (databaseUrl.startsWith("jdbc:postgresql:")) {
+            return DriverManager.getConnection(databaseUrl, properties);
         }
 
         try {
-            URI uri = URI.create(DATABASE_URL);
+            URI uri = URI.create(databaseUrl);
             if (!List.of("postgres", "postgresql").contains(uri.getScheme()) || uri.getHost() == null) {
                 throw new IllegalArgumentException();
             }
@@ -120,7 +127,7 @@ final class Db {
             return DriverManager.getConnection("jdbc:postgresql://" + uri.getHost() + port + path + query, properties);
         } catch (IllegalArgumentException | NullPointerException error) {
             // Connection strings may contain secrets, so do not propagate the URI parser's error.
-            throw new SQLException("Invalid QWORK_DATABASE_URL");
+            throw new SQLException("Invalid " + variableName);
         }
     }
 
@@ -157,8 +164,13 @@ final class Db {
             return;
         }
         Files.createDirectories(sqlitePath().getParent());
-        try (Connection db = openSqlite(false); Statement statement = db.createStatement()) {
+        try (Connection db = openSqlite(true); Statement statement = db.createStatement()) {
             statement.execute("PRAGMA journal_mode = WAL");
+            // The users table has dependent tables. Verify their references after rebuilding it.
+            statement.execute("PRAGMA foreign_keys = OFF");
+            migrateSqliteCheck(db, "users", LEGACY_SQLITE_ROLE_CHECK, SQLITE_ROLE_CHECK);
+            migrateSqliteCheck(db, "work_trip_route_stops", "CHECK (position BETWEEN 1 AND 30)",
+                "CHECK (position BETWEEN 1 AND 50)");
         }
         try (Connection db = connect()) {
             try (Statement statement = db.createStatement()) {
@@ -168,7 +180,7 @@ final class Db {
                         + RepresentativeReviews.SQLITE_SCHEMA + Trips.SQLITE_SCHEMA + TripRequests.SQLITE_SCHEMA
                         + IncidentPush.SQLITE_SCHEMA + TripOffers.SQLITE_SCHEMA + TripRoutes.SQLITE_SCHEMA
                         + TripActualExpenses.SQLITE_SCHEMA + TripOrganizations.SQLITE_SCHEMA
-                        + TripApprovals.SQLITE_SCHEMA).split(";")) {
+                        + TripApprovals.SQLITE_SCHEMA + Contracts.SQLITE_SCHEMA).split(";")) {
                     if (!sql.isBlank()) {
                         statement.execute(sql);
                     }
@@ -206,7 +218,7 @@ final class Db {
             ));
             addMissingColumns(db, "work_trip_requests", Map.of("estimate", "TEXT"));
             addMissingColumns(db, "work_trip_offers", Map.of("proposal_estimate", "TEXT", "declined_at", "TEXT",
-                "self_requested", "INTEGER NOT NULL DEFAULT 0"));
+                "self_requested", "INTEGER NOT NULL DEFAULT 0", "contract_id", "INTEGER REFERENCES work_contracts(id)"));
             FieldWork.initSqlite(db);
             Sync.initSqlite(db);
             update(db, """
@@ -222,6 +234,34 @@ final class Db {
                 ON CONFLICT (login) DO NOTHING
                 """);
             db.commit();
+        }
+    }
+
+    private static void migrateSqliteCheck(Connection db, String tableName, String before, String after) throws SQLException {
+        db.setAutoCommit(false);
+        try {
+            var table = one(db, "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?", tableName);
+            String schema = table == null ? "" : (String) table.get("sql");
+            if (schema.contains(before)) {
+                var dependencies = rows(db, """
+                    SELECT sql FROM sqlite_schema WHERE tbl_name = ?
+                    AND type IN ('index', 'trigger') AND sql IS NOT NULL
+                    """, tableName);
+                // Reuse the existing definition to retain columns added by earlier versions.
+                String replacement = tableName + "_next";
+                update(db, "CREATE TABLE " + replacement + " " + schema.substring(schema.indexOf('(')).replace(before, after));
+                update(db, "INSERT INTO " + replacement + " SELECT * FROM " + tableName);
+                update(db, "DROP TABLE " + tableName);
+                update(db, "ALTER TABLE " + replacement + " RENAME TO " + tableName);
+                for (var dependency : dependencies) update(db, (String) dependency.get("sql"));
+                if (one(db, "PRAGMA foreign_key_check") != null) {
+                    throw new SQLException("Foreign key check failed while updating SQLite table " + tableName);
+                }
+            }
+            db.commit();
+        } catch (SQLException error) {
+            db.rollback();
+            throw error;
         }
     }
 

@@ -9,6 +9,7 @@ const categories = [
   ['meals', 'Питание'],
   ['other', 'Прочие расходы'],
 ];
+const zeroExpenses = Object.fromEntries(categories.map(([key]) => [key, 0]));
 const moneyFormat = new Intl.NumberFormat('ru-KZ', {
   style: 'currency', currency: 'KZT', maximumFractionDigits: 0,
 });
@@ -16,6 +17,13 @@ const dateFormat = new Intl.DateTimeFormat('ru-RU', { dateStyle: 'medium', timeS
 
 function amount(value) {
   return value == null ? '—' : moneyFormat.format(value);
+}
+
+function plannedAmounts(budget, total) {
+  if (!budget || total == null) return null;
+  const amounts = categories.map(([key]) => [key, budget[key]]);
+  if (amounts.some(([, value]) => !Number.isInteger(value) || value < 0 || value > 999999999)) return null;
+  return amounts.reduce((sum, [, value]) => sum + value, 0) === total ? Object.fromEntries(amounts) : null;
 }
 
 function ExpenseComparison({ label, plan, actual }) {
@@ -41,7 +49,7 @@ function Action({ children, onPress, disabled, primary }) {
   </Pressable>;
 }
 
-export function TripActualExpenses({ value, employee, canEdit, offline = false, busy = false, error, onSave }) {
+export function TripActualExpenses({ value, plannedBudget, employee, canEdit, offline = false, busy = false, error, onSave }) {
   const [draft, setDraft] = useState(null);
   const [sending, setSending] = useState(false);
   const inFlight = useRef(false);
@@ -50,28 +58,38 @@ export function TripActualExpenses({ value, employee, canEdit, offline = false, 
   const showForm = editable && draft !== null;
   const disabled = offline || busy || sending;
   const hasActual = value.expensesTotal != null;
+  const plan = plannedAmounts(plannedBudget, value.plannedExpensesTotal);
   const delta = value.expenseDelta ?? value.totalDelta;
   const updated = value.updatedAt ? +new Date(value.updatedAt) : NaN;
   const budget = showForm ? tripBudgetPayload(draft.amounts) : null;
   const draftTotal = budget ? categories.reduce((sum, [key]) => sum + (budget[key] ?? 0), 0) : null;
 
   function startEdit() {
-    const { dailyRate: _dailyRate, ...amounts } = tripBudgetDraft(value);
-    setDraft({ amounts, note: value.note ?? '', revision: value.revision });
+    const { dailyRate: _dailyRate, ...amounts } = tripBudgetDraft(hasActual ? value : plan);
+    setDraft({ amounts, note: value.note ?? '', revision: value.revision, fromPlan: !hasActual && Boolean(plan) });
   }
 
-  async function save() {
-    if (!showForm || !budget || disabled || inFlight.current) return;
+  async function saveExpenses(fields, note, expectedRevision) {
+    if (!editable || disabled || inFlight.current) return false;
     inFlight.current = true;
     setSending(true);
     Keyboard.dismiss();
     try {
-      const fields = Object.fromEntries(categories.map(([key]) => [key, budget[key] ?? 0]));
-      if (await onSave({ ...fields, note: draft.note.trim(), expectedRevision: draft.revision })) setDraft(null);
+      return await onSave({ ...fields, note, expectedRevision });
     } finally {
       inFlight.current = false;
       setSending(false);
     }
+  }
+
+  async function save() {
+    if (!showForm || !budget) return;
+    const fields = Object.fromEntries(categories.map(([key]) => [key, budget[key] ?? 0]));
+    if (await saveExpenses(fields, draft.note.trim(), draft.revision)) setDraft(null);
+  }
+
+  function confirmExpenses(fields) {
+    if (!hasActual && !showForm && fields) void saveExpenses(fields, '', value.revision);
   }
 
   return <View style={styles.card}>
@@ -95,7 +113,9 @@ export function TripActualExpenses({ value, employee, canEdit, offline = false, 
       {Number.isFinite(updated) ? <Text style={styles.muted}>Обновлено · {dateFormat.format(updated)}</Text> : null}
     </View>}
     {showForm ? <View style={styles.details}>
-      <Text style={styles.muted}>Укажите фактические суммы за всю поездку. Пустое поле считается нулём.</Text>
+      <Text style={styles.muted}>{draft.fromPlan
+        ? 'Подставили плановые суммы. Измените те, которые отличаются от фактических. Пустое поле считается нулём.'
+        : 'Укажите фактические суммы за всю поездку. Пустое поле считается нулём.'}</Text>
       {categories.map(([key, label]) => <View key={key} style={styles.field}>
         <Text style={styles.label}>{label}</Text>
         <View style={styles.inputRow}>
@@ -118,9 +138,18 @@ export function TripActualExpenses({ value, employee, canEdit, offline = false, 
         {sending ? 'Сохраняем…' : 'Сохранить фактические расходы'}
       </Action>
       <Action disabled={busy || sending} onPress={() => setDraft(null)}>Отмена</Action>
-    </View> : editable ? <Action disabled={disabled} onPress={startEdit}>
-      {hasActual ? 'Изменить расходы' : 'Указать фактические расходы'}
-    </Action> : null}
+    </View> : editable ? <>
+      {!hasActual && plan && <Action disabled={disabled} onPress={() => confirmExpenses(plan)}>
+        Расходы по плану
+      </Action>}
+      {!hasActual && <Action disabled={disabled} onPress={() => confirmExpenses(zeroExpenses)}>
+        Расходов не было
+      </Action>}
+      <Action disabled={disabled} onPress={startEdit}>
+        {hasActual ? 'Изменить расходы' : plan ? 'Указать отличия от плана' : 'Указать фактические расходы'}
+      </Action>
+      {sending && <Text accessibilityLiveRegion="polite" style={styles.muted}>Сохраняем расходы…</Text>}
+    </> : null}
     {editable && offline ? <Text style={styles.muted}>Для сохранения расходов нужен интернет.</Text> : null}
     {error ? <Text accessibilityRole="alert" style={styles.error}>{error}</Text> : null}
   </View>;

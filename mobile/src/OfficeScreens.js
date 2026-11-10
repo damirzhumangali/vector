@@ -16,6 +16,7 @@ import { DispatcherPhotoPicker, TaskPhotoGallery } from './TaskPhotos';
 import { OfficeShiftPanel, TaskTransfer } from './ShiftScreens';
 import PlanningScreens from './PlanningScreens';
 import AnalyticsScreens from './AnalyticsScreens';
+import ContractsScreen from './ContractsScreen';
 import DeadlinePicker, { deadlineToIso } from './DeadlinePicker';
 import FieldReport, { PRIORITY_LABELS } from './FieldReport';
 import { OfficeFieldOperations, VisitOptionPicker } from './FieldOperations';
@@ -49,6 +50,7 @@ const closedStatuses = ['done', 'cancelled', 'repeated'];
 const staffRoles = [
   ['employee', 'Сотрудник'],
   ['manager', 'Руководитель'],
+  ['accountant', 'Бухгалтер'],
 ];
 
 function RequestError({ message }) {
@@ -155,7 +157,7 @@ function TaskMetrics({ tasks, showReview = false }) {
   </View>;
 }
 
-function Dashboard({ tasks, employees, onOpen, onReview, onTask }) {
+function Dashboard({ tasks, employees, onOpen, onReview, onTask, showContracts }) {
   const pending = tasks.filter(task => task.status === 'review');
   const active = tasks.filter(task => !closedStatuses.includes(task.status));
   const features = [
@@ -183,6 +185,11 @@ function Dashboard({ tasks, employees, onOpen, onReview, onTask }) {
         <Text style={styles.quickDetail}>{detail}</Text>
       </Pressable>)}
     </View>
+    {showContracts && <Pressable accessibilityRole="button" onPress={() => onOpen('contracts')} style={styles.navigationRow}>
+      <View style={styles.todayIcon}><Icon name="clipboard" size={25} color={colors.blue} /></View>
+      <View style={styles.flex}><Text style={styles.label}>Договоры</Text><Text style={styles.muted}>Монтаж, сопровождение и график оплаты</Text></View>
+      <Icon name="chevron-right" size={18} color={colors.muted} />
+    </Pressable>}
     <Pressable accessibilityRole="button" onPress={() => onOpen('analytics')} style={styles.navigationRow}>
       <View style={styles.todayIcon}><Icon name="chart" size={25} color={colors.blue} /></View>
       <View style={styles.flex}><Text style={styles.label}>Аналитика</Text><Text style={styles.muted}>Выполнение, сроки и нагрузка</Text></View>
@@ -1149,11 +1156,13 @@ export default function OfficeScreens({
   role = 'manager', tasks, setTasks, session, employees = [], onCreateTask, onUpdateTask, onCreateEmployee,
   onCancelTask, onRepeatTask, onRenewInvite, onSetDepartment, onResetPassword, objects = [], onCreateObject,
   request, imageSource, onUploadPhoto, onPhotoRejected, onImportedTasks, sampleStaff,
-  section = 'home', onSectionChange, navigationId = 0,
+  section = 'home', onSectionChange, navigationId = 0, offline = false,
 }) {
   const [creating, setCreating] = useState(section === 'home' ? 'overview' : section === 'tasks' ? null : section);
   const internalNavigation = useRef(null);
+  const officeScroll = useRef(null);
   const lastNavigationId = useRef(navigationId);
+  const scrollToTop = useCallback(() => officeScroll.current?.scrollTo({ y: 0, animated: false }), []);
   const [search, setSearch] = useState('');
   const [taskFilter, setTaskFilter] = useState('all');
   const [credentials, setCredentials] = useState(null);
@@ -1174,6 +1183,7 @@ export default function OfficeScreens({
   const planning = creating === 'planning';
   const importing = creating === 'import-tasks';
   const analytics = creating === 'analytics';
+  const contracts = creating === 'contracts';
   const fieldOperations = creating === 'field-operations';
   const fieldTask = creating === 'field-task';
   const departmentEmployee = employees.find(employee => employee.id === departmentEmployeeId);
@@ -1206,7 +1216,7 @@ export default function OfficeScreens({
 
   function navigate(next) {
     const destination = next === 'overview' ? 'home' : next === null ? 'tasks' : next;
-    if (['home', 'tasks', 'team', 'operations', 'planning', 'analytics', 'field-operations'].includes(destination)) {
+    if (['home', 'tasks', 'team', 'operations', 'planning', 'analytics', 'field-operations', 'contracts'].includes(destination)) {
       internalNavigation.current = destination;
       onSectionChange?.(destination);
     }
@@ -1353,6 +1363,7 @@ export default function OfficeScreens({
   return (
     <View style={styles.screen}>
       <ScrollView
+        ref={officeScroll}
         key={selectedId || creating || 'list'}
         style={styles.scroll}
         contentContainerStyle={styles.content}
@@ -1363,16 +1374,16 @@ export default function OfficeScreens({
         <View style={styles.heading}>
           <View style={styles.headingCopy}>
             <Text accessibilityRole="header" style={styles.title}>
-              {selected ? 'Карточка заявки' : creating === 'overview' ? 'Главная' : analytics ? 'Аналитика' : importing ? 'Импорт Excel' : planning ? 'Плановые работы' : operations ? 'Рабочее время' : fieldOperations ? 'Выезды' : fieldTask ? 'Новое выездное задание' : creating === 'team' ? 'Команда' : creating === 'task' ? 'Новая заявка' : creating ? 'Доступ сотрудника' : 'Заявки'}
+              {selected ? 'Карточка заявки' : creating === 'overview' ? 'Главная' : contracts ? 'Договоры' : analytics ? 'Аналитика' : importing ? 'Импорт Excel' : planning ? 'Плановые работы' : operations ? 'Рабочее время' : fieldOperations ? 'Выезды' : fieldTask ? 'Новое выездное задание' : creating === 'team' ? 'Команда' : creating === 'task' ? 'Новая заявка' : creating ? 'Доступ сотрудника' : 'Заявки'}
             </Text>
             <Text style={styles.subtitle}>
-              {selected ? `Заявка №${selected.id}` : creating === 'overview' ? 'Все рабочие дела в одном месте' : analytics ? 'Статистика выполнения и выездов' : importing ? 'Загрузите таблицу и создайте несколько заявок сразу' : planning ? 'Повторяющиеся работы и автоназначение' : operations ? 'График, дежурства и согласования' : fieldOperations ? 'Выездные задания и командировки' : fieldTask ? 'Выберите место, исполнителя и время выезда' : creating === 'team' ? 'Сотрудники и доступ к компании' : creating === 'task' ? 'Поставьте задачу сотруднику' : creating ? 'Настройте доступ к рабочему пространству' : 'Назначение, выполнение и приёмка работ'}
+              {selected ? `Заявка №${selected.id}` : creating === 'overview' ? 'Все рабочие дела в одном месте' : contracts ? 'Плановые платежи за монтаж и сопровождение' : analytics ? 'Статистика выполнения и выездов' : importing ? 'Загрузите таблицу и создайте несколько заявок сразу' : planning ? 'Повторяющиеся работы и автоназначение' : operations ? 'График, дежурства и согласования' : fieldOperations ? 'Выездные задания и командировки' : fieldTask ? 'Выберите место, исполнителя и время выезда' : creating === 'team' ? 'Сотрудники и доступ к компании' : creating === 'task' ? 'Поставьте задачу сотруднику' : creating ? 'Настройте доступ к рабочему пространству' : 'Назначение, выполнение и приёмка работ'}
             </Text>
           </View>
           {!creating && !selected && <Pressable accessibilityRole="button" accessibilityLabel="Создать заявку" onPress={() => openForm('task')} style={styles.addButton}><Icon name="plus" color="#FFFFFF" size={24} /></Pressable>}
         </View>
 
-        {creating === 'overview' && !selected && <Dashboard tasks={tasks} employees={employees}
+        {creating === 'overview' && !selected && <Dashboard tasks={tasks} employees={employees} showContracts={server && canReview}
           onOpen={destination => destination === 'tasks' ? returnToTasks() : openForm(destination)}
           onReview={() => { returnToTasks(); setTaskFilter('review'); }} onTask={openTask} />}
 
@@ -1504,6 +1515,11 @@ export default function OfficeScreens({
             <Button onPress={() => openForm(null)} secondary>‹ К заявкам</Button>
             <AnalyticsScreens request={request} onOpenTask={id => { openForm(null); openTask(String(id)); }} />
           </>
+        )}
+
+        {contracts && server && canReview && request && (
+          <ContractsScreen role={role} request={request} objects={objects} offline={offline}
+            onBack={() => openForm('overview')} onNavigate={scrollToTop} />
         )}
 
         {(creating === 'task' || fieldTask) && (

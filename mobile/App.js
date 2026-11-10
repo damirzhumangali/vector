@@ -8,6 +8,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import AuthScreens from './src/AuthScreens';
 import OfficeScreens from './src/OfficeScreens';
+import ContractsScreen from './src/ContractsScreen';
 import EmployeeDashboard from './src/EmployeeDashboard';
 import EmailSettings from './src/EmailSettings';
 import { colors as c, Icon } from './src/ui';
@@ -74,6 +75,7 @@ const roles = [
   ['employee', 'Задачи', 'Сотрудник', '▤'],
   ['manager', 'Задачи', 'Руководитель', '⊞'],
 ];
+const accountantTabs = [['contracts', 'Договоры', 'clipboard'], ['profile', 'Профиль', 'user']];
 const labels = {
   assigned: 'Назначена',
   accepted: 'Принята',
@@ -175,6 +177,9 @@ function EmployeeHome({ tasks, onSelect }) {
 function Profile({ session, role, onSignOut, onDemoRole, onTasks, onShifts, onQuickAccess, request, push }) {
   const name = session?.user.name ?? roles.find(([key]) => key === role)?.[2] ?? 'qwork';
   const initials = name.split(/\s+/).slice(0, 2).map(part => part[0]).join('').toUpperCase();
+  const accountant = role === 'accountant';
+  const roleLabel = accountant ? 'Бухгалтер' : roles.find(([key]) => key === role)?.[2];
+  const workLabel = accountant ? 'Договоры' : role === 'employee' ? 'Мои задачи' : 'Работы компании';
   return (
     <ScrollView contentContainerStyle={styles.content}>
       <View style={styles.pageIntro}><Text style={styles.pageTitle}>Мой профиль</Text><Text style={styles.muted}>Рабочее пространство и доступ</Text></View>
@@ -182,10 +187,10 @@ function Profile({ session, role, onSignOut, onDemoRole, onTasks, onShifts, onQu
         <View style={styles.profileAvatar}><Text style={styles.profileInitials}>{initials}</Text></View>
         <Text style={styles.profileName}>{name}</Text>
         <Text style={styles.muted}>{session?.company.name ?? 'Демонстрация qwork'}</Text>
-        <View style={styles.profileBadge}><Text style={styles.profileBadgeText}>{roles.find(([key]) => key === role)?.[2]}</Text></View>
+        <View style={styles.profileBadge}><Text style={styles.profileBadgeText}>{roleLabel}</Text></View>
       </View>
       <View style={styles.profileMenu}>
-        {[[role === 'employee' ? 'Мои задачи' : 'Работы компании', 'clipboard', onTasks],
+        {[[workLabel, 'clipboard', onTasks],
           ...(role === 'employee' ? [['Рабочее время', 'clock', onShifts]] : [])].map(([label, icon, onPress]) => (
           <Pressable key={label} onPress={onPress} accessibilityRole="button" style={styles.profileRow}>
             <View style={styles.profileIcon}><Icon name={icon} size={20} /></View><Text style={styles.profileRowLabel}>{label}</Text><Icon name="chevron-right" size={18} color={c.muted} />
@@ -198,7 +203,7 @@ function Profile({ session, role, onSignOut, onDemoRole, onTasks, onShifts, onQu
           <View style={styles.taskCopy}><Text style={styles.profileRowLabel}>Быстрый вход</Text><Text style={styles.smallText}>Настроить вход на этом телефоне</Text></View>
           <Icon name="chevron-right" size={18} color={c.muted} />
         </Pressable>}
-        {session && <Pressable accessibilityRole={push.enable ? 'button' : undefined}
+        {session && !accountant && <Pressable accessibilityRole={push.enable ? 'button' : undefined}
           onPress={push.enable ?? undefined} disabled={!push.enable} style={styles.profileRow}>
           <View style={styles.profileIcon}><Icon name="bell" size={20} /></View>
           <View style={styles.taskCopy}><Text style={styles.profileRowLabel}>Срочные уведомления</Text><Text style={styles.smallText}>{push.status}</Text></View>
@@ -212,6 +217,21 @@ function Profile({ session, role, onSignOut, onDemoRole, onTasks, onShifts, onQu
       <Pressable accessibilityRole="button" onPress={onSignOut} style={styles.signOut}>
         <Icon name="logout" color={c.red} size={20} /><Text style={styles.signOutText}>Выйти из аккаунта</Text>
       </Pressable>
+    </ScrollView>
+  );
+}
+
+function AccountantContracts({ request }) {
+  const scroll = useRef(null);
+  const scrollToTop = useCallback(() => scroll.current?.scrollTo({ y: 0, animated: false }), []);
+  return (
+    <ScrollView ref={scroll} contentContainerStyle={styles.content} automaticallyAdjustKeyboardInsets
+      keyboardShouldPersistTaps="handled">
+      <View style={styles.pageIntro}>
+        <Text accessibilityRole="header" style={styles.pageTitle}>Договоры</Text>
+        <Text style={styles.muted}>График оплаты и поступления от заказчиков</Text>
+      </View>
+      <ContractsScreen role="accountant" request={request} onNavigate={scrollToTop} />
     </ScrollView>
   );
 }
@@ -242,7 +262,8 @@ function Workspace() {
   const offlineMediaRef = useRef(null);
   const refreshRef = useRef(null);
   const sessionRef = useRef(null);
-  const push = useIncidentNotifications(session, sessionRef, navigate);
+  const accountant = role === 'accountant';
+  const push = useIncidentNotifications(accountant ? null : session, sessionRef, navigate);
   const revision = useRef(0);
   const savingTaskRef = useRef(false);
   const [selectedId, setSelectedId] = useState(null);
@@ -321,15 +342,16 @@ function Workspace() {
   }, [demoTasks, storageAvailable]);
 
   useEffect(() => {
-    if (selectedId === null && page === 'home') return;
+    const homePage = accountant ? 'contracts' : 'home';
+    if (selectedId === null && page === homePage) return;
     const back = BackHandler.addEventListener('hardwareBackPress', () => {
       if (selectedId !== null) setSelectedId(null);
       else if (page === 'trips' && tripRoute?.fromShifts) navigate('shifts');
-      else navigate('home');
+      else navigate(homePage);
       return true;
     });
     return () => back.remove();
-  }, [selectedId, page, tripRoute]);
+  }, [selectedId, page, tripRoute, accountant]);
 
   useEffect(() => {
     if (!session) return;
@@ -338,6 +360,7 @@ function Workspace() {
     let prefetching = false;
     const isEmployee = session.user.role === 'employee';
     const isManager = session.user.role === 'manager';
+    const isAccountant = session.user.role === 'accountant';
     const isCurrent = () => !closed && sessionRef.current === session;
     const canSync = () => isCurrent() && !offlineModeRef.current && AppState.currentState !== 'background';
     const scopedRequest = (path, options) => apiRequest(path, { ...options, token: session.token });
@@ -389,6 +412,11 @@ function Workspace() {
       running = true;
       const startedAt = revision.current;
       try {
+        if (isAccountant) {
+          await scopedRequest('/auth/me');
+          if (isCurrent()) setNetworkError('');
+          return;
+        }
         if (isEmployee) {
           const store = await storePromise;
           if (!canSync()) return;
@@ -434,7 +462,7 @@ function Workspace() {
         })
         .catch(error => { if (isCurrent()) setNetworkError(error.message); });
     }
-    const timer = setInterval(() => {
+    const timer = isAccountant ? null : setInterval(() => {
       if (AppState.currentState === 'active') refresh();
     }, 2500);
     const foreground = AppState.addEventListener('change', state => {
@@ -443,7 +471,7 @@ function Workspace() {
     return () => {
       closed = true;
       if (refreshRef.current === refresh) refreshRef.current = null;
-      clearInterval(timer);
+      if (timer !== null) clearInterval(timer);
       foreground.remove();
     };
   }, [session]);
@@ -452,7 +480,7 @@ function Workspace() {
     setSelectedId(null);
     setShowShifts(false);
     setTripRoute(null);
-    setPage('home');
+    setPage(nextRole === 'accountant' ? 'contracts' : 'home');
     setRole(nextRole);
   }
 
@@ -881,7 +909,9 @@ function Workspace() {
             {page === 'profile' ? (
               <Profile session={session} role={role} request={request} onSignOut={signOut} onDemoRole={switchRole} push={push}
                 onQuickAccess={() => setSetupSession(session)}
-                onTasks={() => navigate('tasks')} onShifts={() => navigate('shifts')} />
+                onTasks={() => navigate(accountant ? 'contracts' : 'tasks')} onShifts={() => navigate('shifts')} />
+            ) : accountant ? (
+              <AccountantContracts request={request} />
             ) : role === 'employee' && page === 'home' ? (
               <EmployeeDashboard key={session?.user.id ?? 'demo'} tasks={tasks ?? []} name={session?.user.name}
                 onSelect={openEmployeeTask} request={isEmployeeSession ? request : undefined} offline={showOfflineIcon}
@@ -901,7 +931,7 @@ function Workspace() {
                 tasks={tasks ?? []} onUrgentLeave={enqueueUrgentLeave} onShifts={onShifts}
                 onTrips={openEmployeeTrips}
                 urgentLeavePending={Boolean(offlineSnapshot?.urgentLeavePending)} />
-            ) : tasks === null && !networkError ? (
+            ) : tasks === null && !networkError && page !== 'contracts' ? (
               <View style={styles.loading}><ActivityIndicator color="#245BE8" /></View>
             ) : role === 'employee' ? (
               selected ? (
@@ -927,6 +957,7 @@ function Workspace() {
                 tasks={tasks ?? []}
                 setTasks={setDemoTasks}
                 session={session}
+                offline={offlineMode}
                 employees={employees}
                 objects={objects}
                 onCreateObject={createObject}
@@ -951,15 +982,15 @@ function Workspace() {
           </View>
           <SafeAreaView edges={['bottom']} style={styles.bottomSafe}>
             <View style={styles.roles}>
-              {[
+              {(accountant ? accountantTabs : [
                 ['home', 'Главная', 'home'],
                 ['tasks', 'Задачи', 'clipboard'],
                 ...(role === 'employee'
                   ? [['shifts', 'Рабочее время', 'clock'], ['trips', 'Выезды', 'briefcase']]
                   : [['field-operations', 'Выезды', 'briefcase'], ['analytics', 'Аналитика', 'chart']]),
                 ['profile', 'Профиль', 'user'],
-              ].map(([key, label, icon]) => {
-                const active = page === key || (key === 'home' && ['team','planning','operations'].includes(page));
+              ]).map(([key, label, icon]) => {
+                const active = page === key || (key === 'home' && ['team','planning','operations','contracts'].includes(page));
                 return (
                   <Pressable key={key} accessibilityRole="tab" accessibilityLabel={label}
                     accessibilityState={{selected:active}} onPress={() => navigate(key)} style={styles.role}>

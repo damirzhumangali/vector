@@ -1,0 +1,15 @@
+{
+  "reviewChatId": -1001234567890,
+  "engineers": [
+    { "telegramId": 123456789, "name": "Тестовый инженер" }
+  ],
+  "reviewers": [
+    { "telegramId": 987654321, "name": "Тестовый руководитель" }
+  ],
+  "sites": [
+    { "id": "site-1", "name": "Тестовый объект", "region": "Астана" }
+  ],
+  "assignments": {
+    "123456789": ["site-1"]
+  }
+}

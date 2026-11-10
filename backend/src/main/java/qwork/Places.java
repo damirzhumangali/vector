@@ -53,11 +53,13 @@ final class Places {
     }
 
     static Map<String, Object> tripDestinations(Connection db, Map<String, Object> user) throws SQLException {
+        long company = number(user, "company_id");
         var rows = Db.rows(db, """
             SELECT id, name, address FROM work_sites WHERE company_id = ? ORDER BY name, id
-            """, number(user, "company_id"));
+            """, company);
         return Map.of("objects", rows.stream().map(row -> Map.of("id", row.get("id").toString(),
-            "name", row.get("name"), "address", row.get("address"))).toList());
+            "name", row.get("name"), "address", row.get("address"))).toList(),
+            "contracts", Contracts.tripSources(db, company, rows));
     }
 
     static Selection resolve(Connection db, Map<String, Object> user, Map<String, Object> payload)

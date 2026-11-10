@@ -13,6 +13,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 import static qwork.Domain.error;
@@ -48,10 +49,11 @@ final class Trips {
     private static final Set<String> UNLINKABLE = Set.of("unassigned", "cancelled", "repeated", "refused");
     private static final String SELECT = """
         SELECT trip.*, employee.name AS employee_name, offer.id AS offer_id, offer.comment AS offer_comment,
-            offer.self_requested AS offer_self_requested
+            offer.self_requested AS offer_self_requested, offer.contract_id, contract.number AS contract_number
         FROM work_trips trip
         JOIN users employee ON employee.id = trip.employee_id AND employee.company_id = trip.company_id
         LEFT JOIN work_trip_offers offer ON offer.trip_id = trip.id AND offer.company_id = trip.company_id
+        LEFT JOIN work_contracts contract ON contract.id = offer.contract_id AND contract.company_id = trip.company_id
         WHERE trip.company_id = ?
         """;
 
@@ -313,6 +315,8 @@ final class Trips {
         out.put("employeeName", row.get("employee_name"));
         out.put("destination", row.get("destination"));
         out.put("objectId", row.get("object_id") == null ? null : row.get("object_id").toString());
+        out.put("contractId", Objects.toString(row.get("contract_id"), null));
+        out.put("contractNumber", row.get("contract_number"));
         out.put("address", row.get("address"));
         out.put("basis", row.get("basis"));
         out.put("purpose", row.get("purpose"));

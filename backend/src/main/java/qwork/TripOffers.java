@@ -30,6 +30,7 @@ final class TripOffers {
             confirmed_at TEXT, confirmed_by INTEGER REFERENCES users(id),
             revision INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL,
             self_requested INTEGER NOT NULL DEFAULT 0 CHECK (self_requested IN (0, 1)),
+            contract_id INTEGER REFERENCES work_contracts(id),
             UNIQUE (company_id, created_by, request_id),
             CHECK ((planned_start IS NULL) = (planned_end IS NULL)),
             CHECK ((planned_start IS NULL) = (daily_rate IS NULL)),
@@ -57,9 +58,10 @@ final class TripOffers {
         """;
 
     private static final String SELECT = """
-        SELECT r.*, employee.name AS employee_name
+        SELECT r.*, employee.name AS employee_name, contract.number AS contract_number
         FROM work_trip_offers r
         JOIN users employee ON employee.id = r.employee_id AND employee.company_id = r.company_id
+        LEFT JOIN work_contracts contract ON contract.id = r.contract_id AND contract.company_id = r.company_id
         WHERE r.company_id = ?
         """;
 
@@ -112,14 +114,24 @@ final class TripOffers {
         if (!(body.getOrDefault("scheduleVisit", false) instanceof Boolean scheduleVisit)) {
             throw error(400, "Проверьте настройку времени посещения.");
         }
-        var destinations = TripRoutes.destinations(body);
+        Long contractId = body.get("contractId") == null ? null : Trips.identifier(body.get("contractId"), "Договор");
+        String city = field(body, "city", "Город", 300, true);
+        List<String> destinations;
+        if (contractId != null) {
+            if (scheduleVisit || body.get("objectId") != null || body.containsKey("destinations") || body.containsKey("destination")) {
+                throw error(400, "Для командировки по договору используются его объекты.");
+            }
+            destinations = Contracts.tripDestinations(db, company, contractId, body.get("objectIds"), city);
+        } else {
+            if (body.containsKey("objectIds")) throw error(400, "Выберите договор для этих объектов.");
+            destinations = TripRoutes.destinations(body);
+        }
         if (scheduleVisit && (body.get("objectId") == null || !destinations.isEmpty())) {
             throw error(400, "Для отдельного времени посещения выберите один объект из справочника.");
         }
         var destination = destinations.isEmpty() ? Trips.destination(db, user, body, null)
             : new Trips.Destination(null, destinations.getFirst(), "");
-        String city = field(body, "city", "Город", 300, true);
-        if (!city.isEmpty()) {
+        if (contractId == null && !city.isEmpty()) {
             if (destination.objectId() == null) {
                 throw error(400, "Укажите город вместе с объектом из справочника.");
             }
@@ -133,11 +145,11 @@ final class TripOffers {
         Trips.lockEmployee(db, company, employee);
         var inserted = Db.one(db, """
             INSERT INTO work_trip_offers(company_id, employee_id, created_by, request_id,
-                destination, object_id, address, purpose, comment, created_at, self_requested)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                destination, object_id, address, purpose, comment, created_at, self_requested, contract_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
             ON CONFLICT (company_id, created_by, request_id) DO NOTHING RETURNING id
             """, company, employee, employee, requestId, destination.name(), destination.objectId(),
-            destination.address(), purpose, comment, Trips.now());
+            destination.address(), purpose, comment, Trips.now(), contractId);
         if (inserted != null) {
             long offerId = number(inserted, "id");
             TripRoutes.add(db, offerId, destinations);
@@ -146,6 +158,7 @@ final class TripOffers {
 
         var existing = Db.one(db, SELECT + " AND r.created_by = ? AND r.request_id = ?", company, employee, requestId);
         if (existing == null || !selfRequested(existing) || number(existing, "employee_id") != employee
+                || !Objects.equals(Objects.toString(existing.get("contract_id"), null), Objects.toString(contractId, null))
                 || !Objects.equals(Objects.toString(existing.get("object_id"), null), Objects.toString(destination.objectId(), null))
                 || !destination.name().equals(existing.get("destination")) || !destination.address().equals(existing.get("address"))
                 || !purpose.equals(existing.get("purpose")) || !comment.equals(existing.get("comment"))
@@ -452,6 +465,8 @@ final class TripOffers {
         out.put("destination", row.get("destination"));
         out.put("address", row.get("address"));
         out.put("objectId", Objects.toString(row.get("object_id"), null));
+        out.put("contractId", Objects.toString(row.get("contract_id"), null));
+        out.put("contractNumber", row.get("contract_number"));
         out.put("purpose", row.get("purpose"));
         out.put("comment", row.get("comment"));
         out.put("stops", route);

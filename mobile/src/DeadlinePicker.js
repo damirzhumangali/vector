@@ -53,13 +53,14 @@ export function deadlineToIso(value) {
 }
 
 export default function DeadlinePicker({ value, onChange, disabled = false,
-  label = 'Выполнить до', required = false, showQuick = true, showHelper = true, suggestedDate, minimumDate, maximumDate }) {
+  label = 'Выполнить до', required = false, showQuick = true, showHelper = true, suggestedDate, minimumDate, maximumDate,
+  dateOnly = false }) {
   const [editor, setEditor] = useState(null);
   const [draft, setDraft] = useState(null);
   const insets = useSafeAreaInsets();
   const selected = validDate(value) ? value : null;
   const customLabel = label !== 'Выполнить до';
-  const dateLabel = customLabel ? `${label}. Дата` : 'Дата выполнения';
+  const dateLabel = dateOnly ? label : customLabel ? `${label}. Дата` : 'Дата выполнения';
   const timeLabel = customLabel ? `${label}. Время` : 'Время выполнения';
   const today = new Date();
   const tomorrow = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
@@ -110,7 +111,8 @@ export default function DeadlinePicker({ value, onChange, disabled = false,
       value={draft}
       mode={editor}
       display={Platform.OS === 'ios' ? 'spinner' : 'default'}
-      minimumDate={editor === 'date' ? startOfDay(validDate(minimumDate) ? minimumDate : today) : undefined}
+      minimumDate={editor === 'date' && (validDate(minimumDate) || !dateOnly)
+        ? startOfDay(validDate(minimumDate) ? minimumDate : today) : undefined}
       maximumDate={editor === 'date' && validDate(maximumDate) ? startOfDay(maximumDate) : undefined}
       locale="ru-RU"
       is24Hour
@@ -131,7 +133,7 @@ export default function DeadlinePicker({ value, onChange, disabled = false,
           <Text style={styles.link}>Без срока</Text>
         </Pressable> : <Text style={styles.optional}>Необязательно</Text>)}
       </View>
-      {showQuick && <View style={styles.quickRow}>
+      {showQuick && !dateOnly && <View style={styles.quickRow}>
         {[[0, 'Сегодня', today], [1, 'Завтра', tomorrow]].map(([offset, label, day]) => (
           <Pressable key={offset} accessibilityRole="button" accessibilityLabel={`Выполнить ${label.toLowerCase()}`}
             accessibilityState={{ disabled: disabled || (offset === 0 && !todayAvailable), selected: sameDay(selected, day) }}
@@ -162,7 +164,7 @@ export default function DeadlinePicker({ value, onChange, disabled = false,
           </View>
           <Icon name="chevron-right" color={colors.muted} size={16} />
         </Pressable>
-        <Pressable accessibilityRole="button" accessibilityLabel={selected
+        {!dateOnly && <Pressable accessibilityRole="button" accessibilityLabel={selected
           ? `${timeLabel}. ${selected.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', hour12: false })}`
           : customLabel ? timeLabel : 'Выбрать время выполнения'}
           accessibilityState={{ disabled }} disabled={disabled} onPress={() => open('time')}
@@ -175,9 +177,9 @@ export default function DeadlinePicker({ value, onChange, disabled = false,
               : 'Не выбрано'}</Text>
           </View>
           <Icon name="chevron-right" color={colors.muted} size={16} />
-        </Pressable>
+        </Pressable>}
       </View>
-      {showHelper && <Text style={styles.helper}>{selected
+      {showHelper && !dateOnly && <Text style={styles.helper}>{selected
         ? 'Дата и время по часовому поясу вашего телефона.'
         : required ? 'Выберите дату и время.' : 'Можно создать заявку без срока или выбрать удобную дату и время.'}</Text>}
       {Platform.OS === 'ios' ? (

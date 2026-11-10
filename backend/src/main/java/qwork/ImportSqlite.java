@@ -24,7 +24,8 @@ final class ImportSqlite {
         "field_work_defaults", "task_representative_reviews", "work_trips", "work_trip_tasks", "employee_work_modes",
         "work_trip_requests", "work_trip_request_tasks", "task_assignment_changes", "planning_import_runs",
         "push_devices", "incident_push_jobs", "work_trip_offers", "work_trip_offer_history", "work_trip_route_stops",
-        "work_trip_actual_expenses", "trip_organizations", "trip_approval_settings", "work_trip_offer_approvals");
+        "work_trip_actual_expenses", "trip_organizations", "trip_approval_settings", "work_trip_offer_approvals",
+        "work_contracts", "contract_payment_receipts");
     private static final List<Table> TABLES = List.of(
         new Table("companies", "id code name", ""),
         new Table("trip_organizations", "company_id name_key name", ""),
@@ -35,6 +36,10 @@ final class ImportSqlite {
         new Table("sessions", "token_hash user_id expires_at", ""),
         new Table("push_devices", "token session_hash", ""),
         new Table("work_sites", "id company_id name address latitude longitude radius", ""),
+        new Table("work_contracts", "id company_id number number_key signed_on customer legal_entity legal_entity_key "
+            + "object_ids installation_amount support_amount payment_mode payments status revision", ""),
+        new Table("contract_payment_receipts",
+            "id contract_id payment_index request_id amount received_on created_at recorded_by recorded_by_name", ""),
         new Table("tasks", "id company_id assignee_id title object address description status checks photo_before photo_after rework_reason revision",
             "location deadline arrival repeat_of cancel_reason result object_id "
                 + "purpose priority manager_id checklist outcome photo_pairs repeat_reason scheduled_start"),
@@ -52,7 +57,7 @@ final class ImportSqlite {
         new Table("work_trip_offers",
             "id company_id employee_id created_by destination address purpose comment revision created_at",
             "request_id object_id planned_start planned_end daily_rate proposed_at trip_id confirmed_at confirmed_by "
-                + "proposal_estimate declined_at self_requested"),
+                + "proposal_estimate declined_at self_requested contract_id"),
         new Table("work_trip_offer_approvals", "offer_id position approver_id reason",
             "decision decided_at decided_revision"),
         new Table("work_trip_offer_history", "offer_id revision kind actor_id happened_at reason",

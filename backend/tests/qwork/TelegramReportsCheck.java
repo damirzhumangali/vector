@@ -95,6 +95,9 @@ final class TelegramReportsCheck {
                 check(telegram.messages(ENGINEER).size() == messages,
                     "Restart repeated an already sent deadline reminder");
             }
+            try (var store = new TelegramReportStore(directory.resolve("deadline-buttons.sqlite3"))) {
+                checkDeadlineButtons(catalog, api, telegram, store);
+            }
         }
         System.out.println("Telegram report workflow passed.");
     }
@@ -319,9 +322,6 @@ final class TelegramReportsCheck {
         check(telegram.calls.size() == before && bot.nextReminderAt() == Long.MAX_VALUE,
             "An unauthorized user accessed report deadlines");
 
-        bot.handle(message(99, REVIEWER, Map.of("text", "/deadline")));
-        check(telegram.lastText(REVIEWER).contains("Например, /deadline") && bot.nextReminderAt() == Long.MAX_VALUE,
-            "Selecting the deadline menu command did not show help without setting a deadline");
         bot.handle(message(102, REVIEWER, Map.of("text", deadline)));
         bot.handle(message(103, REVIEWER, Map.of("text", "/missing")));
         check(telegram.lastText(REVIEWER).contains("Северный объект")
@@ -349,6 +349,95 @@ final class TelegramReportsCheck {
             && telegram.lastText(ENGINEER).contains("Северный объект")
             && telegram.messages(SECOND_ENGINEER).size() == secondMessages
             && bot.nextReminderAt() == Long.MAX_VALUE, "Reminder was duplicated, missed or sent to the wrong engineer");
+    }
+
+    private static void checkDeadlineButtons(TelegramReportCatalog catalog, TelegramReportApi api,
+            MockTelegram telegram, TelegramReportStore store) throws Exception {
+        var zone = ZoneId.of("Asia/Almaty");
+        var tomorrow = ZonedDateTime.now(zone).toLocalDate().plusDays(1);
+        var deadlineMenu = new TelegramReportDeadlineMenu(catalog, api);
+        var bot = new TelegramReports(catalog, store, api, deadlineMenu);
+        bot.handle(message(120, REVIEWER, Map.of("text", "/deadline")));
+        var employeeChoices = telegram.lastMessage(REVIEWER);
+        check(employeeChoices.payload().path("text").asText().contains("Выберите сотрудника"),
+            "The deadline menu did not open the employee picker");
+        check(!deadlineButton(employeeChoices, "Все сотрудники").isEmpty()
+            && !deadlineButton(employeeChoices, "Тестовый инженер").isEmpty()
+            && deadlineButton(employeeChoices, "Инженер без объектов").isEmpty(),
+            "Employee picker did not show only employees with assignments and the all-employees option");
+
+        long messageId = employeeChoices.messageId();
+        bot = new TelegramReports(catalog, store, api, deadlineMenu);
+        pressDeadlineButton(bot, 121, employeeChoices, "Второй инженер");
+        var objectChoices = telegram.deadlineStep(REVIEWER, messageId);
+        check(objectChoices.payload().path("text").asText().contains("Выберите объект")
+            && !deadlineButton(objectChoices, "Все объекты").isEmpty()
+            && deadlineButton(objectChoices, "Северный объект").isEmpty(),
+            "The deadline picker offered an object outside the selected employee's assignments");
+
+        pressDeadlineButton(bot, 122, objectChoices, "Южный объект");
+        var dates = telegram.deadlineStep(REVIEWER, messageId);
+        check(dates.payload().path("text").asText().contains("Выберите дату"), "No deadline date picker was shown");
+        pressDeadlineButton(bot, 123, dates, "Завтра");
+        var times = telegram.deadlineStep(REVIEWER, messageId);
+        check(times.payload().path("text").asText().contains("Выберите время")
+            && !deadlineButton(times, "18:00").isEmpty(), "No deadline time picker with quick choices was shown");
+        pressDeadlineButton(bot, 124, times, "Другое время");
+        pressDeadlineButton(bot, 125, telegram.deadlineStep(REVIEWER, messageId), "17 ч");
+        pressDeadlineButton(bot, 126, telegram.deadlineStep(REVIEWER, messageId), "40–49");
+        pressDeadlineButton(bot, 127, telegram.deadlineStep(REVIEWER, messageId), "17:47");
+        var confirmation = telegram.deadlineStep(REVIEWER, messageId);
+        String text = confirmation.payload().path("text").asText();
+        check(text.contains("Второй инженер") && text.contains("Южный объект") && text.contains("17:47"),
+            "Confirmation did not show the selected assignment and time");
+        check(store.missingDeadlines().isEmpty(), "Opening deadline confirmation created a deadline");
+
+        String confirm = deadlineButton(confirmation, "Подтвердить");
+        bot.handle(callback(128, ENGINEER, ENGINEER, messageId, confirm));
+        bot.handle(callback(129, OTHER_REVIEWER, OTHER_REVIEWER, messageId, confirm));
+        check(store.missingDeadlines().isEmpty(), "A different user confirmed the reviewer's deadline");
+        pressDeadlineButton(bot, 130, confirmation, "Подтвердить");
+        var deadlines = store.missingDeadlines();
+        check(deadlines.size() == 1 && deadlines.getFirst().engineerId() == SECOND_ENGINEER
+            && "south".equals(deadlines.getFirst().siteId())
+            && deadlines.getFirst().dueAt() == tomorrow.atTime(17, 47).atZone(zone).toEpochSecond(),
+            "Deadline buttons saved the wrong assignments or time");
+
+        var revised = tomorrow.atTime(19, 0).atZone(zone);
+        String revisedDeadline = revised.format(DateTimeFormatter.ofPattern("dd.MM.uuuu HH:mm"));
+        bot.handle(message(131, REVIEWER, Map.of("text", "/deadline " + revisedDeadline + " " + SECOND_ENGINEER + " south")));
+        deadlines = store.missingDeadlines();
+        check(deadlines.size() == 1 && deadlines.getFirst().dueAt() == revised.toEpochSecond(),
+            "The typed command could not reschedule a deadline created through buttons");
+        pressDeadlineButton(bot, 132, confirmation, "Подтвердить");
+        check(store.missingDeadlines().equals(deadlines), "Repeating confirmation changed the saved deadline");
+
+        bot.handle(message(133, REVIEWER, Map.of("text", "/deadline")));
+        var newChoices = telegram.lastMessage(REVIEWER);
+        pressDeadlineButton(bot, 134, newChoices, "Все сотрудники");
+        var allDates = telegram.deadlineStep(REVIEWER, newChoices.messageId());
+        pressDeadlineButton(bot, 135, allDates, "Отмена");
+        var cancelled = telegram.deadlineStep(REVIEWER, newChoices.messageId());
+        check(cancelled.payload().path("text").asText().contains("отменена") && buttons(cancelled).isEmpty(),
+            "Cancelling a deadline picker left it active");
+        pressDeadlineButton(bot, 136, allDates, "Завтра");
+        check(telegram.deadlineStep(REVIEWER, newChoices.messageId()).equals(cancelled)
+            && store.missingDeadlines().equals(deadlines), "An old date button changed the cancelled picker");
+    }
+
+    private static void pressDeadlineButton(TelegramReports bot, long updateId, Call step, String label) throws Exception {
+        String action = deadlineButton(step, label);
+        check(action.startsWith("dl:"), "The deadline picker did not offer button " + label);
+        bot.handle(callback(updateId, REVIEWER, REVIEWER, step.messageId(), action));
+    }
+
+    private static String deadlineButton(Call call, String label) {
+        for (var row : call.payload().path("reply_markup").path("inline_keyboard")) {
+            for (var key : row) {
+                if (key.path("text").asText().contains(label)) return key.path("callback_data").asText();
+            }
+        }
+        return "";
     }
 
     private static boolean editTargets(Call edit, Call message) {
@@ -470,6 +559,11 @@ final class TelegramReportsCheck {
         }
 
         Call lastMessage(long user) { return messages(user).getLast(); }
+
+        Call deadlineStep(long user, long messageId) {
+            return calls.stream().filter(call -> "editMessageText".equals(call.method())
+                && call.payload().path("chat_id").asLong() == user && call.messageId() == messageId).toList().getLast();
+        }
 
         String lastText(long user) { return lastMessage(user).payload().path("text").asText(); }
 

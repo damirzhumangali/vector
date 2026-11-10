@@ -24,14 +24,12 @@ final class TelegramReports {
     private static final int MAX_REASON_LENGTH = 500;
     private static final int SITE_CHOICES = 8;
     private static final int DEADLINE_PAGE_SIZE = 10;
-    private static final ZoneId ZONE = ZoneId.of("Asia/Almaty");
+    static final ZoneId ZONE = ZoneId.of("Asia/Almaty");
     private static final DateTimeFormatter DATE = DateTimeFormatter.ofPattern("dd.MM.uuuu HH:mm XXX");
     private static final DateTimeFormatter DEADLINE_DATE =
         DateTimeFormatter.ofPattern("dd.MM.uuuu HH:mm").withResolverStyle(ResolverStyle.STRICT);
-    private static final String DEADLINE_HELP = "Чтобы задать срок всем назначенным объектам, отправьте "
-        + "/deadline ДД.ММ.ГГГГ ЧЧ:ММ по времени Казахстана. "
-        + "Для одного сотрудника добавьте его Telegram ID после времени. "
-        + "Для одного объекта добавьте ещё его код. /missing покажет, по каким объектам отчётов пока нет.";
+    private static final String DEADLINE_HELP = "В меню выберите «Задать срок сдачи». "
+        + "Бот предложит сотрудника, объект, дату и время. «Посмотреть несданные отчёты» откроет список объектов без отчёта.";
     private static final List<List<Map<String, String>>> MENU = List.of(List.of(button("Добавить отчёт", "new")));
     private static final List<Map<String, String>> COMMON_COMMANDS = List.of(
         command("start", "Открыть бота"),
@@ -41,11 +39,18 @@ final class TelegramReports {
     private final TelegramReportCatalog catalog;
     private final TelegramReportStore store;
     private final TelegramReportApi api;
+    private final TelegramReportDeadlineMenu deadlineMenu;
 
     TelegramReports(TelegramReportCatalog catalog, TelegramReportStore store, TelegramReportApi api) {
+        this(catalog, store, api, new TelegramReportDeadlineMenu(catalog, api));
+    }
+
+    TelegramReports(TelegramReportCatalog catalog, TelegramReportStore store, TelegramReportApi api,
+                    TelegramReportDeadlineMenu deadlineMenu) {
         this.catalog = catalog;
         this.store = store;
         this.api = api;
+        this.deadlineMenu = deadlineMenu;
     }
 
     public static void main(String[] args) {
@@ -205,6 +210,12 @@ final class TelegramReports {
         }
         if (!"private".equals(chatType) || chatId != engineer) return;
 
+        if (callback.isObject() && callback.path("data").asText().startsWith("dl:")) {
+            if (catalog.reviewers().containsKey(engineer)) deadlineMenu.handle(engineer, callback, store);
+            else answer(callback, "Задавать сроки могут руководители.");
+            return;
+        }
+
         String text = message.path("text").asText("").strip();
         if ("/start".equals(text) && !callback.isObject()) {
             updateCommands(api, engineer, commandsFor(catalog, engineer));
@@ -274,7 +285,10 @@ final class TelegramReports {
         if (!text.startsWith("/")) return false;
         String[] args = text.split("\\s+");
         switch (args[0]) {
-            case "/deadline" -> setDeadline(reviewer, args, updateId);
+            case "/deadline" -> {
+                if (args.length == 1) deadlineMenu.open(reviewer, updateId);
+                else setDeadline(reviewer, args, updateId);
+            }
             case "/missing" -> showMissing(reviewer, args);
             default -> { return false; }
         }
@@ -284,7 +298,7 @@ final class TelegramReports {
     private void setDeadline(long reviewer, String[] args, long updateId) throws Exception {
         if (args.length < 3 || args.length > 5) {
             String tomorrow = DEADLINE_DATE.format(LocalDateTime.now(ZONE).toLocalDate().plusDays(1).atTime(18, 0));
-            reply(reviewer, DEADLINE_HELP + "\n\nНапример, /deadline " + tomorrow);
+            reply(reviewer, "Выберите «Задать срок сдачи» в меню. Пример команды — /deadline " + tomorrow);
             return;
         }
         long now = Instant.now().getEpochSecond();
@@ -302,14 +316,7 @@ final class TelegramReports {
         }
         List<Long> engineers = args.length >= 4 ? List.of(positiveId(args[3]))
             : catalog.engineers().keySet().stream().sorted().toList();
-        var assignments = new ArrayList<TelegramReportStore.DeadlineAssignment>();
-        for (long engineer : engineers) {
-            for (var site : catalog.search(engineer, "")) {
-                if (args.length < 5 || site.id().equals(args[4])) {
-                    assignments.add(new TelegramReportStore.DeadlineAssignment(engineer, site.id()));
-                }
-            }
-        }
+        var assignments = deadlineMenu.assignments(engineers, args.length == 5 ? args[4] : null);
         if (assignments.isEmpty()) {
             reply(reviewer, "Для выбранных сотрудников и объектов нет назначений. Проверьте Telegram ID и код объекта.");
             return;
@@ -406,7 +413,7 @@ final class TelegramReports {
         return catalog.site(deadline.engineerId(), deadline.siteId()) != null;
     }
 
-    private static String formatDeadline(long time) {
+    static String formatDeadline(long time) {
         return DEADLINE_DATE.format(Instant.ofEpochSecond(time).atZone(ZONE));
     }
 
@@ -472,6 +479,10 @@ final class TelegramReports {
     }
 
     private void answer(JsonNode callback, String text) throws IOException, InterruptedException {
+        answer(api, callback, text);
+    }
+
+    static void answer(TelegramReportApi api, JsonNode callback, String text) throws IOException, InterruptedException {
         String id = callback.path("id").asText();
         try {
             if (text == null) api.answer(id);
@@ -743,7 +754,7 @@ final class TelegramReports {
         return error.status() == 400 || error.status() == 403;
     }
 
-    private static Map<String, String> button(String label, String action) {
+    static Map<String, String> button(String label, String action) {
         return Map.of("text", label, "callback_data", action);
     }
 }

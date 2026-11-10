@@ -37,6 +37,7 @@ final class TelegramReportWebhook implements AutoCloseable {
     private final Stores stores;
     private final TelegramReportCatalog catalog;
     private final TelegramReportApi api;
+    private final TelegramReportDeadlineMenu deadlineMenu;
     private final boolean remindersEnabled;
     private Thread commandMenuSetup;
     private ScheduledFuture<?> reminderWake;
@@ -52,6 +53,7 @@ final class TelegramReportWebhook implements AutoCloseable {
         this.secret = validateSecret(secret).getBytes(StandardCharsets.UTF_8);
         this.catalog = catalog;
         this.api = api;
+        this.deadlineMenu = new TelegramReportDeadlineMenu(catalog, api);
         this.stores = stores;
         remindersEnabled = !catalog.reviewers().isEmpty()
             && catalog.assignments().values().stream().anyMatch(sites -> !sites.isEmpty());
@@ -197,7 +199,7 @@ final class TelegramReportWebhook implements AutoCloseable {
     private boolean drainBatch() throws Exception {
         try (var store = stores.open()) {
             if (!store.acquireWebhookWorker()) throw new IOException("Другой экземпляр обрабатывает очередь.");
-            var bot = new TelegramReports(catalog, store, api);
+            var bot = new TelegramReports(catalog, store, api, deadlineMenu);
             int count = 0;
             while (count < BATCH_SIZE) {
                 var pending = store.pendingWebhookUpdate();

@@ -55,8 +55,7 @@ final class TelegramReportWebhook implements AutoCloseable {
         this.api = api;
         this.deadlineMenu = new TelegramReportDeadlineMenu(catalog, api);
         this.stores = stores;
-        remindersEnabled = !catalog.reviewers().isEmpty()
-            && catalog.assignments().values().stream().anyMatch(sites -> !sites.isEmpty());
+        remindersEnabled = catalog.assignments().values().stream().anyMatch(sites -> !sites.isEmpty());
         worker.setRemoveOnCancelPolicy(true);
         server = HttpServer.create(address, 32);
         server.createContext("/health", this::health);

@@ -5,12 +5,9 @@ import com.fasterxml.jackson.databind.JsonNode;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Instant;
-import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
-import java.time.format.DateTimeParseException;
-import java.time.format.ResolverStyle;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -27,9 +24,9 @@ final class TelegramReports {
     static final ZoneId ZONE = ZoneId.of("Asia/Almaty");
     private static final DateTimeFormatter DATE = DateTimeFormatter.ofPattern("dd.MM.uuuu HH:mm XXX");
     private static final DateTimeFormatter DEADLINE_DATE =
-        DateTimeFormatter.ofPattern("dd.MM.uuuu HH:mm").withResolverStyle(ResolverStyle.STRICT);
-    private static final String DEADLINE_HELP = "В меню выберите «Задать срок сдачи». "
-        + "Бот предложит сотрудника, объект, дату и время. «Посмотреть несданные отчёты» откроет список объектов без отчёта.";
+        DateTimeFormatter.ofPattern("dd.MM.uuuu HH:mm");
+    private static final String DEADLINE_HELP = "В меню выберите «Задать срок сдачи», затем объект, дату и время.";
+    private static final String MISSING_HELP = "В меню «Посмотреть несданные отчёты» видны сроки, которые выбрали сотрудники.";
     private static final List<List<Map<String, String>>> MENU = List.of(List.of(button("Добавить отчёт", "new")));
     private static final List<Map<String, String>> COMMON_COMMANDS = List.of(
         command("start", "Открыть бота"),
@@ -116,10 +113,10 @@ final class TelegramReports {
         if (catalog.engineers().containsKey(user)) {
             commands.add(command("new", "Добавить или продолжить отчёт"));
             commands.add(command("cancel", "Отменить черновик"));
+            commands.add(command("deadline", "Задать срок сдачи"));
         }
         if (catalog.reviewers().containsKey(user)) {
             commands.add(command("missing", "Посмотреть несданные отчёты"));
-            commands.add(command("deadline", "Задать срок сдачи"));
         }
         commands.addAll(COMMON_COMMANDS);
         return commands;
@@ -211,8 +208,8 @@ final class TelegramReports {
         if (!"private".equals(chatType) || chatId != engineer) return;
 
         if (callback.isObject() && callback.path("data").asText().startsWith("dl:")) {
-            if (catalog.reviewers().containsKey(engineer)) deadlineMenu.handle(engineer, callback, store);
-            else answer(callback, "Задавать сроки могут руководители.");
+            if (catalog.engineers().containsKey(engineer)) deadlineMenu.handle(engineer, callback, store);
+            else answer(callback, "Срок сдачи выбирает сотрудник для своего объекта.");
             return;
         }
 
@@ -224,13 +221,12 @@ final class TelegramReports {
             reply(engineer, "Ваш Telegram ID: " + engineer + ". Его можно передать администратору для доступа.");
             return;
         }
-        if (!callback.isObject() && catalog.reviewers().containsKey(engineer)
-                && handleDeadlineCommand(engineer, text, update.path("update_id").asLong())) return;
+        if (!callback.isObject() && handleDeadlineCommand(engineer, text, update.path("update_id").asLong())) return;
         if (!catalog.engineers().containsKey(engineer)) {
             if ("/start".equals(text) || "/help".equals(text)) {
                 if (catalog.reviewers().containsKey(engineer)) {
                     reply(engineer, "Проверяйте отчёты в группе проверки. Нажмите «Принять» или «На доработку». "
-                        + "Для доработки ответьте на сообщение бота с просьбой указать причину.\n\n" + DEADLINE_HELP);
+                        + "Для доработки ответьте на сообщение бота с просьбой указать причину.\n\n" + MISSING_HELP);
                 } else {
                     reply(engineer, "Попросите администратора добавить вас в список инженеров. Узнать свой ID: /id.");
                 }
@@ -260,8 +256,8 @@ final class TelegramReports {
             case "/help" -> {
                 if (draft == null) api.send(engineer, "TMS Report — отчёты по обслуживанию СКУД. Выберите объект, "
                     + "отправьте видео после работ и опишите результат.\n\n"
-                    + "К незавершённому отчёту можно вернуться командой /start."
-                    + (catalog.reviewers().containsKey(engineer) ? "\n\n" + DEADLINE_HELP : ""), MENU);
+                    + "К незавершённому отчёту можно вернуться командой /start.\n\n" + DEADLINE_HELP
+                    + (catalog.reviewers().containsKey(engineer) ? "\n\n" + MISSING_HELP : ""), MENU);
                 else prompt(draft);
             }
             case "/cancel" -> {
@@ -281,50 +277,24 @@ final class TelegramReports {
         }
     }
 
-    private boolean handleDeadlineCommand(long reviewer, String text, long updateId) throws Exception {
+    private boolean handleDeadlineCommand(long user, String text, long updateId) throws Exception {
         if (!text.startsWith("/")) return false;
         String[] args = text.split("\\s+");
         switch (args[0]) {
             case "/deadline" -> {
-                if (args.length == 1) deadlineMenu.open(reviewer, updateId);
-                else setDeadline(reviewer, args, updateId);
+                if (catalog.engineers().containsKey(user)) {
+                    if (args.length == 1) deadlineMenu.open(user, updateId);
+                    else reply(user, DEADLINE_HELP);
+                } else if (catalog.reviewers().containsKey(user)) {
+                    reply(user, "Срок сдачи выбирает сотрудник для своего объекта.");
+                }
             }
-            case "/missing" -> showMissing(reviewer, args);
+            case "/missing" -> {
+                if (catalog.reviewers().containsKey(user)) showMissing(user, args);
+            }
             default -> { return false; }
         }
         return true;
-    }
-
-    private void setDeadline(long reviewer, String[] args, long updateId) throws Exception {
-        if (args.length < 3 || args.length > 5) {
-            String tomorrow = DEADLINE_DATE.format(LocalDateTime.now(ZONE).toLocalDate().plusDays(1).atTime(18, 0));
-            reply(reviewer, "Выберите «Задать срок сдачи» в меню. Пример команды — /deadline " + tomorrow);
-            return;
-        }
-        long now = Instant.now().getEpochSecond();
-        long dueAt;
-        try {
-            dueAt = LocalDateTime.parse(args[1] + " " + args[2], DEADLINE_DATE)
-                .atZone(ZONE).toEpochSecond();
-        } catch (DateTimeParseException invalid) {
-            reply(reviewer, "Проверьте дату и время. Формат — /deadline ДД.ММ.ГГГГ ЧЧ:ММ.");
-            return;
-        }
-        if (dueAt <= now) {
-            reply(reviewer, "Укажите будущий срок по времени Казахстана.");
-            return;
-        }
-        List<Long> engineers = args.length >= 4 ? List.of(positiveId(args[3]))
-            : catalog.engineers().keySet().stream().sorted().toList();
-        var assignments = deadlineMenu.assignments(engineers, args.length == 5 ? args[4] : null);
-        if (assignments.isEmpty()) {
-            reply(reviewer, "Для выбранных сотрудников и объектов нет назначений. Проверьте Telegram ID и код объекта.");
-            return;
-        }
-        if (store.setDeadlines(updateId, assignments, now, dueAt)) {
-            reply(reviewer, "Срок сдачи — " + formatDeadline(dueAt) + " по времени Казахстана. Назначений: "
-                + assignments.size() + ". Проверить отчёты: /missing.");
-        }
     }
 
     private void showMissing(long reviewer, String[] args) throws Exception {
@@ -335,7 +305,7 @@ final class TelegramReports {
         }
         var deadlines = store.missingDeadlines().stream().filter(this::isAssigned).toList();
         if (deadlines.isEmpty()) {
-            reply(reviewer, "Нет ожидаемых отчётов. Задать срок сдачи: /deadline.");
+            reply(reviewer, "Нет ожидаемых отчётов. Здесь появятся сроки, которые выберут сотрудники.");
             return;
         }
         int pages = (deadlines.size() - 1) / DEADLINE_PAGE_SIZE + 1;

@@ -9,6 +9,7 @@ import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
@@ -87,7 +88,7 @@ final class TelegramReportsCheck {
                 checkDelivery(telegram);
                 checkReview(restarted, telegram, store);
                 checkScopedObjects(restarted, telegram, store);
-                checkDeadlines(restarted, telegram);
+                checkDeadlines(restarted, telegram, store);
             }
             try (var store = new TelegramReportStore(database)) {
                 int messages = telegram.messages(ENGINEER).size();
@@ -111,11 +112,11 @@ final class TelegramReportsCheck {
         TelegramReports.syncCommandMenus(roles, api);
         check("all_private_chats".equals(telegram.calls.get(1).payload().path("scope").path("type").asText())
             && telegram.menu(null).equals(List.of("start", "help", "id")), "Fallback menu exposed work commands");
-        check(telegram.menu(SECOND_ENGINEER).equals(List.of("new", "cancel", "start", "help", "id")),
+        check(telegram.menu(SECOND_ENGINEER).equals(List.of("new", "cancel", "deadline", "start", "help", "id")),
             "Engineer menu did not contain only its allowed work commands");
-        check(telegram.menu(REVIEWER).equals(List.of("missing", "deadline", "start", "help", "id")),
+        check(telegram.menu(REVIEWER).equals(List.of("missing", "start", "help", "id")),
             "Reviewer menu did not contain only its allowed work commands");
-        check(telegram.menu(ENGINEER).equals(List.of("new", "cancel", "missing", "deadline", "start", "help", "id")),
+        check(telegram.menu(ENGINEER).equals(List.of("new", "cancel", "deadline", "missing", "start", "help", "id")),
             "An engineer who also reviews reports did not receive both sets of commands");
     }
 
@@ -312,27 +313,29 @@ final class TelegramReportsCheck {
             "Engineer without assignments saw objects or started a draft");
     }
 
-    private static void checkDeadlines(TelegramReports bot, MockTelegram telegram) throws Exception {
+    private static void checkDeadlines(TelegramReports bot, MockTelegram telegram, TelegramReportStore store)
+            throws Exception {
         var dueAt = ZonedDateTime.now(ZoneId.of("Asia/Almaty")).plusHours(1).withSecond(0).withNano(0);
-        String date = dueAt.format(DateTimeFormatter.ofPattern("dd.MM.uuuu HH:mm"));
-        String deadline = "/deadline " + date;
         int before = telegram.calls.size();
-        bot.handle(message(100, STRANGER, Map.of("text", deadline)));
+        bot.handle(message(100, STRANGER, Map.of("text", "/deadline")));
         bot.handle(message(101, STRANGER, Map.of("text", "/missing")));
         check(telegram.calls.size() == before && bot.nextReminderAt() == Long.MAX_VALUE,
             "An unauthorized user accessed report deadlines");
 
-        bot.handle(message(102, REVIEWER, Map.of("text", deadline)));
+        var assignments = List.of(new TelegramReportStore.DeadlineAssignment(ENGINEER, "north"),
+            new TelegramReportStore.DeadlineAssignment(SECOND_ENGINEER, "south"));
+        long due = dueAt.toEpochSecond();
+        store.setDeadlines(102, assignments, Instant.now().getEpochSecond(), due);
         bot.handle(message(103, REVIEWER, Map.of("text", "/missing")));
         check(telegram.lastText(REVIEWER).contains("Северный объект")
             && telegram.lastText(REVIEWER).contains("Южный объект")
-            && bot.nextReminderAt() == dueAt.toEpochSecond(), "A historical report satisfied a new deadline");
+            && bot.nextReminderAt() == due, "A historical report satisfied a new deadline");
 
         bot.handle(callback(104, SECOND_ENGINEER, "site:south"));
         bot.handle(message(105, SECOND_ENGINEER, Map.of("video", Map.of("file_id", "new-video"))));
         bot.handle(message(106, SECOND_ENGINEER, Map.of("text", RESULT)));
         bot.handle(message(107, SECOND_ENGINEER, Map.of("text", "/send")));
-        bot.handle(message(108, REVIEWER, Map.of("text", deadline)));
+        store.setDeadlines(108, assignments, Instant.now().getEpochSecond(), due);
         bot.handle(message(109, REVIEWER, Map.of("text", "/missing")));
         check(telegram.lastText(REVIEWER).contains("Северный объект")
             && !telegram.lastText(REVIEWER).contains("Южный объект"),
@@ -340,7 +343,6 @@ final class TelegramReportsCheck {
 
         int firstMessages = telegram.messages(ENGINEER).size();
         int secondMessages = telegram.messages(SECOND_ENGINEER).size();
-        long due = dueAt.toEpochSecond();
         bot.sendDueReminders(due - 1);
         check(telegram.messages(ENGINEER).size() == firstMessages, "The bot reminded before the deadline");
         bot.sendDueReminders(due);
@@ -355,80 +357,95 @@ final class TelegramReportsCheck {
             MockTelegram telegram, TelegramReportStore store) throws Exception {
         var zone = ZoneId.of("Asia/Almaty");
         var tomorrow = ZonedDateTime.now(zone).toLocalDate().plusDays(1);
-        var deadlineMenu = new TelegramReportDeadlineMenu(catalog, api);
-        var bot = new TelegramReports(catalog, store, api, deadlineMenu);
+        var reviewers = new LinkedHashMap<>(catalog.reviewers());
+        reviewers.put(ENGINEER, catalog.engineers().get(ENGINEER));
+        var roles = new TelegramReportCatalog(catalog.reviewChatId(), catalog.engineers(), catalog.sites(),
+            reviewers, catalog.assignments());
+        var deadlineMenu = new TelegramReportDeadlineMenu(roles, api);
+        var bot = new TelegramReports(roles, store, api, deadlineMenu);
         bot.handle(message(120, REVIEWER, Map.of("text", "/deadline")));
-        var employeeChoices = telegram.lastMessage(REVIEWER);
-        check(employeeChoices.payload().path("text").asText().contains("Выберите сотрудника"),
-            "The deadline menu did not open the employee picker");
-        check(!deadlineButton(employeeChoices, "Все сотрудники").isEmpty()
-            && !deadlineButton(employeeChoices, "Тестовый инженер").isEmpty()
-            && deadlineButton(employeeChoices, "Инженер без объектов").isEmpty(),
-            "Employee picker did not show only employees with assignments and the all-employees option");
+        check(telegram.lastText(REVIEWER).contains("Срок сдачи выбирает сотрудник для своего объекта")
+            && buttons(telegram.lastMessage(REVIEWER)).isEmpty(), "A reviewer opened the deadline picker");
+        bot.handle(message(121, UNASSIGNED_ENGINEER, Map.of("text", "/deadline")));
+        check(buttons(telegram.lastMessage(UNASSIGNED_ENGINEER)).isEmpty(),
+            "An engineer without assignments was offered a deadline picker");
 
-        long messageId = employeeChoices.messageId();
-        bot = new TelegramReports(catalog, store, api, deadlineMenu);
-        pressDeadlineButton(bot, 121, employeeChoices, "Второй инженер");
-        var objectChoices = telegram.deadlineStep(REVIEWER, messageId);
-        check(objectChoices.payload().path("text").asText().contains("Выберите объект")
-            && !deadlineButton(objectChoices, "Все объекты").isEmpty()
-            && deadlineButton(objectChoices, "Северный объект").isEmpty(),
-            "The deadline picker offered an object outside the selected employee's assignments");
+        bot.handle(message(122, SECOND_ENGINEER, Map.of("text", "/deadline")));
+        var objectChoices = telegram.lastMessage(SECOND_ENGINEER);
+        check(objectChoices.payload().path("text").asText().contains("Выберите объект для отчёта")
+            && !deadlineButton(objectChoices, "Южный объект").isEmpty()
+            && deadlineButton(objectChoices, "Северный объект").isEmpty()
+            && deadlineButton(objectChoices, "Все объекты").isEmpty(),
+            "The deadline picker did not limit selection to individual assigned sites");
+        long messageId = objectChoices.messageId();
 
-        pressDeadlineButton(bot, 122, objectChoices, "Южный объект");
-        var dates = telegram.deadlineStep(REVIEWER, messageId);
+        bot = new TelegramReports(roles, store, api, deadlineMenu);
+        pressDeadlineButton(bot, 123, SECOND_ENGINEER, objectChoices, "Южный объект");
+        var dates = telegram.deadlineStep(SECOND_ENGINEER, messageId);
         check(dates.payload().path("text").asText().contains("Выберите дату"), "No deadline date picker was shown");
-        pressDeadlineButton(bot, 123, dates, "Завтра");
-        var times = telegram.deadlineStep(REVIEWER, messageId);
+        pressDeadlineButton(bot, 124, SECOND_ENGINEER, dates, "Завтра");
+        var times = telegram.deadlineStep(SECOND_ENGINEER, messageId);
         check(times.payload().path("text").asText().contains("Выберите время")
             && !deadlineButton(times, "18:00").isEmpty(), "No deadline time picker with quick choices was shown");
-        pressDeadlineButton(bot, 124, times, "Другое время");
-        pressDeadlineButton(bot, 125, telegram.deadlineStep(REVIEWER, messageId), "17 ч");
-        pressDeadlineButton(bot, 126, telegram.deadlineStep(REVIEWER, messageId), "40–49");
-        pressDeadlineButton(bot, 127, telegram.deadlineStep(REVIEWER, messageId), "17:47");
-        var confirmation = telegram.deadlineStep(REVIEWER, messageId);
+        pressDeadlineButton(bot, 125, SECOND_ENGINEER, times, "Другое время");
+        pressDeadlineButton(bot, 126, SECOND_ENGINEER, telegram.deadlineStep(SECOND_ENGINEER, messageId), "17 ч");
+        pressDeadlineButton(bot, 127, SECOND_ENGINEER, telegram.deadlineStep(SECOND_ENGINEER, messageId), "40–49");
+        pressDeadlineButton(bot, 128, SECOND_ENGINEER, telegram.deadlineStep(SECOND_ENGINEER, messageId), "17:47");
+        var confirmation = telegram.deadlineStep(SECOND_ENGINEER, messageId);
         String text = confirmation.payload().path("text").asText();
         check(text.contains("Второй инженер") && text.contains("Южный объект") && text.contains("17:47"),
             "Confirmation did not show the selected assignment and time");
         check(store.missingDeadlines().isEmpty(), "Opening deadline confirmation created a deadline");
 
         String confirm = deadlineButton(confirmation, "Подтвердить");
-        bot.handle(callback(128, ENGINEER, ENGINEER, messageId, confirm));
-        bot.handle(callback(129, OTHER_REVIEWER, OTHER_REVIEWER, messageId, confirm));
-        check(store.missingDeadlines().isEmpty(), "A different user confirmed the reviewer's deadline");
-        pressDeadlineButton(bot, 130, confirmation, "Подтвердить");
+        bot.handle(callback(129, ENGINEER, ENGINEER, messageId, confirm));
+        bot.handle(callback(130, REVIEWER, REVIEWER, messageId, confirm));
+        check(store.missingDeadlines().isEmpty(), "A different user confirmed the engineer's deadline");
+        pressDeadlineButton(bot, 131, SECOND_ENGINEER, confirmation, "Подтвердить");
         var deadlines = store.missingDeadlines();
         check(deadlines.size() == 1 && deadlines.getFirst().engineerId() == SECOND_ENGINEER
             && "south".equals(deadlines.getFirst().siteId())
-            && deadlines.getFirst().dueAt() == tomorrow.atTime(17, 47).atZone(zone).toEpochSecond(),
-            "Deadline buttons saved the wrong assignments or time");
+            && deadlines.getFirst().dueAt() == tomorrow.atTime(17, 47).atZone(zone).toEpochSecond()
+            && bot.nextReminderAt() == deadlines.getFirst().dueAt()
+            && telegram.deadlineStep(SECOND_ENGINEER, messageId).payload().path("text").asText()
+                .contains("Срок сдачи установлен"), "Deadline buttons did not confirm the selected object and time");
+        bot.handle(message(132, REVIEWER, Map.of("text", "/missing")));
+        check(telegram.lastText(REVIEWER).contains("Южный объект")
+            && telegram.lastText(REVIEWER).contains("Второй инженер")
+            && telegram.lastText(REVIEWER).contains("17:47"), "Reviewer could not see the employee's deadline");
+        int replies = telegram.messages(SECOND_ENGINEER).size();
+        bot.handle(message(133, SECOND_ENGINEER, Map.of("text", "/missing")));
+        check(telegram.messages(SECOND_ENGINEER).size() == replies, "Engineer could access the reviewer deadline list");
 
-        var revised = tomorrow.atTime(19, 0).atZone(zone);
-        String revisedDeadline = revised.format(DateTimeFormatter.ofPattern("dd.MM.uuuu HH:mm"));
-        bot.handle(message(131, REVIEWER, Map.of("text", "/deadline " + revisedDeadline + " " + SECOND_ENGINEER + " south")));
-        deadlines = store.missingDeadlines();
-        check(deadlines.size() == 1 && deadlines.getFirst().dueAt() == revised.toEpochSecond(),
-            "The typed command could not reschedule a deadline created through buttons");
-        pressDeadlineButton(bot, 132, confirmation, "Подтвердить");
+        String revisedDeadline = tomorrow.atTime(19, 0).format(DateTimeFormatter.ofPattern("dd.MM.uuuu HH:mm"));
+        bot.handle(message(134, SECOND_ENGINEER,
+            Map.of("text", "/deadline " + revisedDeadline + " " + ENGINEER + " north")));
+        check(telegram.lastText(SECOND_ENGINEER).contains("Задать срок сдачи") && store.missingDeadlines().equals(deadlines),
+            "The typed command bypassed the deadline picker");
+        pressDeadlineButton(bot, 135, SECOND_ENGINEER, confirmation, "Подтвердить");
         check(store.missingDeadlines().equals(deadlines), "Repeating confirmation changed the saved deadline");
 
-        bot.handle(message(133, REVIEWER, Map.of("text", "/deadline")));
-        var newChoices = telegram.lastMessage(REVIEWER);
-        pressDeadlineButton(bot, 134, newChoices, "Все сотрудники");
-        var allDates = telegram.deadlineStep(REVIEWER, newChoices.messageId());
-        pressDeadlineButton(bot, 135, allDates, "Отмена");
-        var cancelled = telegram.deadlineStep(REVIEWER, newChoices.messageId());
+        bot.handle(message(136, ENGINEER, Map.of("text", "/missing")));
+        check(telegram.lastText(ENGINEER).contains("Южный объект"), "Dual role could not see employee deadlines");
+        bot.handle(message(137, ENGINEER, Map.of("text", "/deadline")));
+        var newChoices = telegram.lastMessage(ENGINEER);
+        check(deadlineButton(newChoices, "Южный объект").isEmpty(), "Dual role could set another engineer's deadline");
+        pressDeadlineButton(bot, 138, ENGINEER, newChoices, "Северный объект");
+        var northDates = telegram.deadlineStep(ENGINEER, newChoices.messageId());
+        pressDeadlineButton(bot, 139, ENGINEER, northDates, "Отмена");
+        var cancelled = telegram.deadlineStep(ENGINEER, newChoices.messageId());
         check(cancelled.payload().path("text").asText().contains("отменена") && buttons(cancelled).isEmpty(),
             "Cancelling a deadline picker left it active");
-        pressDeadlineButton(bot, 136, allDates, "Завтра");
-        check(telegram.deadlineStep(REVIEWER, newChoices.messageId()).equals(cancelled)
+        pressDeadlineButton(bot, 140, ENGINEER, northDates, "Завтра");
+        check(telegram.deadlineStep(ENGINEER, newChoices.messageId()).equals(cancelled)
             && store.missingDeadlines().equals(deadlines), "An old date button changed the cancelled picker");
     }
 
-    private static void pressDeadlineButton(TelegramReports bot, long updateId, Call step, String label) throws Exception {
+    private static void pressDeadlineButton(TelegramReports bot, long updateId, long engineer, Call step, String label)
+            throws Exception {
         String action = deadlineButton(step, label);
         check(action.startsWith("dl:"), "The deadline picker did not offer button " + label);
-        bot.handle(callback(updateId, REVIEWER, REVIEWER, step.messageId(), action));
+        bot.handle(callback(updateId, engineer, engineer, step.messageId(), action));
     }
 
     private static String deadlineButton(Call call, String label) {

@@ -10,7 +10,6 @@ import java.time.LocalTime;
 import java.time.YearMonth;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -38,12 +37,12 @@ final class TelegramReportDeadlineMenu {
         this.api = api;
     }
 
-    void open(long reviewer, long operationId) throws IOException, InterruptedException {
-        show(reviewer, 0, operationId, employees(0));
+    void open(long engineer, long operationId) throws IOException, InterruptedException {
+        show(engineer, 0, operationId, sites(engineer, 0));
     }
 
-    void handle(long reviewer, JsonNode callback, TelegramReportStore store) throws Exception {
-        var current = active.get(reviewer);
+    void handle(long engineer, JsonNode callback, TelegramReportStore store) throws Exception {
+        var current = active.get(engineer);
         long messageId = callback.path("message").path("message_id").asLong();
         String action = callback.path("data").asText();
         var choice = current != null && current.messageId() == messageId ? current.choices().get(action) : null;
@@ -52,10 +51,10 @@ final class TelegramReportDeadlineMenu {
             return;
         }
         TelegramReports.answer(api, callback, null);
-        show(reviewer, messageId, current.operationId(), choice.step().open(store, current.operationId()));
+        show(engineer, messageId, current.operationId(), choice.step().open(store, current.operationId()));
     }
 
-    private void show(long reviewer, long messageId, long operationId, Page page)
+    private void show(long engineer, long messageId, long operationId, Page page)
             throws IOException, InterruptedException {
         String prefix = "dl:" + UUID.randomUUID() + ":";
         var choices = new HashMap<String, Choice>();
@@ -69,40 +68,20 @@ final class TelegramReportDeadlineMenu {
             }
             keyboard.add(keys);
         }
-        if (messageId == 0) messageId = api.send(reviewer, page.text, keyboard);
-        else api.edit(reviewer, messageId, page.text, keyboard);
-        if (choices.isEmpty()) active.remove(reviewer);
-        else active.put(reviewer, new ActivePage(messageId, operationId, choices));
-    }
-
-    private Page employees(int index) {
-        var engineers = catalog.assignments().entrySet().stream()
-            .filter(entry -> !entry.getValue().isEmpty())
-            .map(Map.Entry::getKey)
-            .sorted(Comparator.comparing((Long id) -> catalog.engineers().get(id), String.CASE_INSENSITIVE_ORDER)
-                .thenComparingLong(Long::longValue))
-            .toList();
-        if (engineers.isEmpty()) return new Page("Пока ни одному сотруднику не назначены объекты.");
-
-        var page = new Page("Выберите сотрудника");
-        if (engineers.size() > 1) {
-            page.add(next("Все сотрудники", () -> dates(new Target(engineers, null), YearMonth.now(ZONE))));
-        }
-        engineers.stream().skip(index).limit(PAGE_SIZE)
-            .forEach(engineer -> page.add(next(catalog.engineers().get(engineer), () -> sites(engineer, 0))));
-        paginate(page, index, engineers.size(), this::employees);
-        return finish(page, null);
+        if (messageId == 0) messageId = api.send(engineer, page.text, keyboard);
+        else api.edit(engineer, messageId, page.text, keyboard);
+        if (choices.isEmpty()) active.remove(engineer);
+        else active.put(engineer, new ActivePage(messageId, operationId, choices));
     }
 
     private Page sites(long engineer, int index) {
         var sites = catalog.search(engineer, "");
-        var engineers = List.of(engineer);
-        var page = new Page("Выберите объект\n" + catalog.engineers().get(engineer));
-        page.add(next("Все объекты", () -> dates(new Target(engineers, null), YearMonth.now(ZONE))));
+        if (sites.isEmpty()) return new Page("Вам пока не назначены объекты.");
+        var page = new Page("Выберите объект для отчёта");
         sites.stream().skip(index).limit(PAGE_SIZE)
-            .forEach(site -> page.add(next(site.label(), () -> dates(new Target(engineers, site), YearMonth.now(ZONE)))));
+            .forEach(site -> page.add(next(site.label(), () -> dates(new Target(engineer, site), YearMonth.now(ZONE)))));
         paginate(page, index, sites.size(), i -> sites(engineer, i));
-        return finish(page, next("‹ Назад", () -> employees(0)));
+        return finish(page, null);
     }
 
     private Page dates(Target target, YearMonth month) {
@@ -127,8 +106,7 @@ final class TelegramReportDeadlineMenu {
         if (shown.isAfter(current)) navigation.add(next("‹ Месяц", () -> dates(target, shown.minusMonths(1))));
         navigation.add(next("Месяц ›", () -> dates(target, shown.plusMonths(1))));
         page.rows.add(navigation);
-        return finish(page, next("‹ Назад", () -> target.engineers().size() == 1
-            ? sites(target.engineers().getFirst(), 0) : employees(0)));
+        return finish(page, next("‹ Назад", () -> sites(target.engineer(), 0)));
     }
 
     private Page times(Target target, LocalDate date) {
@@ -199,9 +177,8 @@ final class TelegramReportDeadlineMenu {
     private Page confirm(Target target, LocalDate date, LocalTime time) {
         long dueAt = epoch(date, time);
         if (dueAt <= Instant.now().getEpochSecond()) return times(target, date);
-        var assignments = assignments(target.engineers(), target.site() == null ? null : target.site().id());
-        String details = targetLabel(target) + "\nСрок · " + formatDeadline(dueAt) + " по времени Казахстана"
-            + "\nНазначений · " + assignments.size();
+        var assignment = new TelegramReportStore.DeadlineAssignment(target.engineer(), target.site().id());
+        String details = targetLabel(target) + "\nСрок · " + formatDeadline(dueAt) + " по времени Казахстана";
         var page = new Page("Проверьте срок сдачи\n\n" + details);
         page.add(new Choice("Подтвердить", (store, operationId) -> {
             long now = Instant.now().getEpochSecond();
@@ -209,29 +186,15 @@ final class TelegramReportDeadlineMenu {
                 var expired = times(target, date);
                 return new Page("Выбранное время уже прошло.\n\n" + expired.text, expired.rows);
             }
-            store.setDeadlines(operationId, assignments, now, dueAt);
+            store.setDeadlines(operationId, List.of(assignment), now, dueAt);
             return new Page("Срок сдачи установлен\n\n" + details
-                + "\n\nСтатус отчётов можно проверить в разделе «Посмотреть несданные отчёты».");
+                + "\n\nЕсли отчёт к этому времени ещё не сдан, бот напомнит о нём.");
         }));
         return finish(page, next("‹ Назад", () -> times(target, date)));
     }
 
-    List<TelegramReportStore.DeadlineAssignment> assignments(List<Long> engineers, String siteId) {
-        var assignments = new ArrayList<TelegramReportStore.DeadlineAssignment>();
-        for (long engineer : engineers) {
-            for (var site : catalog.search(engineer, "")) {
-                if (siteId == null || site.id().equals(siteId)) {
-                    assignments.add(new TelegramReportStore.DeadlineAssignment(engineer, site.id()));
-                }
-            }
-        }
-        return assignments;
-    }
-
     private String targetLabel(Target target) {
-        String engineer = target.engineers().size() == 1
-            ? catalog.engineers().get(target.engineers().getFirst()) : "Все сотрудники с назначениями";
-        return engineer + "\n" + (target.site() == null ? "Все назначенные объекты" : target.site().label());
+        return catalog.engineers().get(target.engineer()) + "\n" + target.site().label();
     }
 
     private static void paginate(Page page, int index, int total, IntFunction<Page> show) {
@@ -265,7 +228,7 @@ final class TelegramReportDeadlineMenu {
     }
 
     private record Choice(String label, Step step) {}
-    private record Target(List<Long> engineers, TelegramReportCatalog.Site site) {}
+    private record Target(long engineer, TelegramReportCatalog.Site site) {}
     private record ActivePage(long messageId, long operationId, Map<String, Choice> choices) {}
 
     private record Page(String text, List<List<Choice>> rows) {

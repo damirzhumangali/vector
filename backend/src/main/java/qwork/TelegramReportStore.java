@@ -65,6 +65,8 @@ final class TelegramReportStore implements AutoCloseable {
             notice_step INTEGER NOT NULL DEFAULT 0,
             UNIQUE(report_number, revision)
         );
+        CREATE INDEX IF NOT EXISTS telegram_report_first_versions_by_site ON telegram_report_versions(site_id, delivery_id)
+            WHERE revision = 1;
         CREATE TABLE IF NOT EXISTS telegram_review_prompts (
             delivery_id BIGINT NOT NULL REFERENCES telegram_report_versions(delivery_id),
             reviewer_id BIGINT NOT NULL,
@@ -75,6 +77,25 @@ final class TelegramReportStore implements AutoCloseable {
             engineer_id BIGINT PRIMARY KEY NOT NULL REFERENCES telegram_drafts(engineer_id) ON DELETE CASCADE,
             source_delivery_id BIGINT NOT NULL REFERENCES telegram_report_versions(delivery_id)
         );
+        CREATE TABLE IF NOT EXISTS telegram_report_deadline_commands (
+            update_id BIGINT PRIMARY KEY NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS telegram_report_deadlines (
+            id %s PRIMARY KEY,
+            engineer_id BIGINT NOT NULL,
+            site_id TEXT NOT NULL,
+            created_at BIGINT NOT NULL,
+            due_at BIGINT NOT NULL CHECK (due_at > created_at),
+            report_cutoff BIGINT NOT NULL,
+            reminder_attempted_at BIGINT,
+            reminder_delivered_at BIGINT,
+            reminder_retry_at BIGINT,
+            UNIQUE (engineer_id, site_id),
+            CHECK (reminder_delivered_at IS NULL OR reminder_attempted_at IS NOT NULL),
+            CHECK (reminder_retry_at IS NULL OR reminder_attempted_at IS NULL)
+        );
+        CREATE INDEX IF NOT EXISTS telegram_report_reminders_due ON telegram_report_deadlines(due_at, id)
+            WHERE reminder_attempted_at IS NULL;
         CREATE TABLE IF NOT EXISTS telegram_webhook_updates (
             queue_id %s PRIMARY KEY,
             update_id BIGINT NOT NULL UNIQUE,
@@ -87,6 +108,12 @@ final class TelegramReportStore implements AutoCloseable {
         """;
 
     record WebhookUpdate(long id, String payload) {}
+
+    record DeadlineAssignment(long engineerId, String siteId) {}
+
+    record Deadline(long id, long engineerId, String siteId, long createdAt, long dueAt) {}
+
+    record ReminderSchedule(long engineerId, String siteId, long checkAt) {}
 
     record Draft(long engineerId, String siteId, Long before, Long after, String result, List<Long> documents) {
         Draft {
@@ -122,6 +149,34 @@ final class TelegramReportStore implements AutoCloseable {
                 WHERE newer.report_number = v.report_number AND newer.revision > v.revision AND delivery.failed = 0)
                 AS current_version
         FROM telegram_report_versions v JOIN telegram_reports r ON r.id = v.delivery_id
+        """;
+
+    // Delivery IDs distinguish reports queued before and after a deadline, even within the same minute.
+    private static final String MISSING_REPORT = """
+        NOT EXISTS (
+            SELECT 1 FROM telegram_report_versions v JOIN telegram_reports r ON r.id = v.delivery_id
+            WHERE v.delivery_id > telegram_report_deadlines.report_cutoff
+                AND v.revision = 1
+                AND v.site_id = telegram_report_deadlines.site_id
+                AND r.engineer_id = telegram_report_deadlines.engineer_id
+        )
+        """;
+    private static final String SET_DEADLINE = """
+        INSERT INTO telegram_report_deadlines(engineer_id, site_id, created_at, due_at, report_cutoff)
+        SELECT incoming.engineer_id, incoming.site_id, COALESCE(existing.created_at, incoming.created_at),
+            incoming.due_at, COALESCE(existing.report_cutoff, incoming.report_cutoff)
+        FROM (SELECT ? AS engineer_id, ? AS site_id, ? AS created_at, ? AS due_at, ? AS report_cutoff) incoming
+        LEFT JOIN (
+            SELECT * FROM telegram_report_deadlines WHERE %s
+        ) existing ON existing.engineer_id = incoming.engineer_id AND existing.site_id = incoming.site_id
+        WHERE TRUE
+        ON CONFLICT (engineer_id, site_id) DO UPDATE SET id = excluded.id,
+            created_at = excluded.created_at, due_at = excluded.due_at, report_cutoff = excluded.report_cutoff,
+            reminder_attempted_at = NULL, reminder_delivered_at = NULL, reminder_retry_at = NULL
+        WHERE telegram_report_deadlines.due_at <> excluded.due_at
+        """.formatted(MISSING_REPORT);
+    private static final String REMINDER_DUE = """
+        reminder_attempted_at IS NULL AND due_at <= ? AND (reminder_retry_at IS NULL OR reminder_retry_at <= ?)
         """;
 
     private final FileChannel instanceLock;
@@ -218,7 +273,7 @@ final class TelegramReportStore implements AutoCloseable {
 
     private static void createTables(Connection connection, String identity) throws SQLException {
         try (var statement = connection.createStatement()) {
-            String tables = SCHEMA.formatted(REPORTS_TABLE.formatted("telegram_reports", identity), identity);
+            String tables = SCHEMA.formatted(REPORTS_TABLE.formatted("telegram_reports", identity), identity, identity);
             for (String sql : tables.split(";")) {
                 if (!sql.isBlank()) statement.execute(sql);
             }
@@ -314,6 +369,84 @@ final class TelegramReportStore implements AutoCloseable {
 
     void resetOffset() throws SQLException {
         Db.update(db, "UPDATE telegram_state SET next_offset = 0 WHERE id = 1 AND next_offset <> 0");
+    }
+
+    boolean setDeadlines(long updateId, List<DeadlineAssignment> assignments, long createdAt, long dueAt)
+            throws SQLException, IOException {
+        return transaction(() -> {
+            int inserted = Db.update(db, """
+                INSERT INTO telegram_report_deadline_commands(update_id) VALUES (?) ON CONFLICT DO NOTHING
+                """, updateId);
+            if (inserted == 0) return false;
+
+            long cutoff = ((Number) Db.one(db, "SELECT COALESCE(MAX(id), 0) AS cutoff FROM telegram_reports")
+                .get("cutoff")).longValue();
+            try (var statement = db.prepareStatement(SET_DEADLINE)) {
+                int batch = 0;
+                for (var assignment : assignments) {
+                    statement.setLong(1, assignment.engineerId());
+                    statement.setString(2, assignment.siteId());
+                    statement.setLong(3, createdAt);
+                    statement.setLong(4, dueAt);
+                    statement.setLong(5, cutoff);
+                    statement.addBatch();
+                    if (++batch == 500) {
+                        statement.executeBatch();
+                        batch = 0;
+                    }
+                }
+                if (batch > 0) statement.executeBatch();
+            }
+            return true;
+        });
+    }
+
+    List<Deadline> missingDeadlines() throws SQLException {
+        return deadlines("SELECT * FROM telegram_report_deadlines WHERE " + MISSING_REPORT);
+    }
+
+    List<Deadline> dueDeadlines(long now) throws SQLException {
+        return deadlines("SELECT * FROM telegram_report_deadlines WHERE " + REMINDER_DUE + " AND " + MISSING_REPORT,
+            now, now);
+    }
+
+    List<ReminderSchedule> reminderSchedule() throws SQLException {
+        return Db.rows(db, """
+            SELECT engineer_id, site_id, CASE WHEN reminder_retry_at > due_at THEN reminder_retry_at ELSE due_at END AS check_at
+            FROM telegram_report_deadlines WHERE reminder_attempted_at IS NULL AND %s
+            ORDER BY check_at, id
+            """.formatted(MISSING_REPORT)).stream()
+            .map(row -> new ReminderSchedule(nullableLong(row.get("engineer_id")), (String) row.get("site_id"),
+                nullableLong(row.get("check_at"))))
+            .toList();
+    }
+
+    private List<Deadline> deadlines(String query, Object... parameters) throws SQLException {
+        return Db.rows(db, query + " ORDER BY due_at, id", parameters).stream()
+            .map(row -> new Deadline(nullableLong(row.get("id")), nullableLong(row.get("engineer_id")),
+                (String) row.get("site_id"), nullableLong(row.get("created_at")), nullableLong(row.get("due_at"))))
+            .toList();
+    }
+
+    boolean claimReminder(long deadlineId, long now) throws SQLException {
+        return Db.update(db, """
+            UPDATE telegram_report_deadlines SET reminder_attempted_at = ?, reminder_retry_at = NULL WHERE id = ?
+            AND %s AND %s
+            """.formatted(REMINDER_DUE, MISSING_REPORT), now, deadlineId, now, now) == 1;
+    }
+
+    void releaseReminder(long deadlineId, long now, long retryAt) throws SQLException {
+        Db.update(db, """
+            UPDATE telegram_report_deadlines SET reminder_attempted_at = NULL, reminder_retry_at = ?
+            WHERE id = ? AND reminder_attempted_at = ? AND reminder_delivered_at IS NULL
+            """, retryAt, deadlineId, now);
+    }
+
+    void markReminderDelivered(long deadlineId, long now) throws SQLException {
+        Db.update(db, """
+            UPDATE telegram_report_deadlines SET reminder_delivered_at = ?
+            WHERE id = ? AND reminder_attempted_at IS NOT NULL AND reminder_delivered_at IS NULL
+            """, now, deadlineId);
     }
 
     Draft draft(long engineerId) throws SQLException, IOException {

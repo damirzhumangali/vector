@@ -12,9 +12,10 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.sql.SQLException;
+import java.time.Instant;
 import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
@@ -23,6 +24,7 @@ final class TelegramReportWebhook implements AutoCloseable {
     private static final int MAX_UPDATE_BYTES = 1_048_576;
     private static final int BATCH_SIZE = 25;
     private static final int RETRY_LIMIT = 5;
+    private static final int REMINDER_RETRY_SECONDS = 60;
     private static final String SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token";
     private static final ObjectReader UPDATE_JSON = Db.JSON.reader()
         .with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
@@ -30,11 +32,15 @@ final class TelegramReportWebhook implements AutoCloseable {
     private final HttpServer server;
     private final ThreadPoolExecutor requests = new ThreadPoolExecutor(
         4, 4, 0L, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(32));
-    private final ScheduledExecutorService worker = Executors.newSingleThreadScheduledExecutor();
+    private final ScheduledThreadPoolExecutor worker = new ScheduledThreadPoolExecutor(1);
     private final byte[] secret;
     private final Stores stores;
     private final TelegramReportCatalog catalog;
     private final TelegramReportApi api;
+    private final boolean remindersEnabled;
+    private ScheduledFuture<?> reminderWake;
+    private long reminderWakeAt = Long.MAX_VALUE;
+    private long reminderRetryAt;
     private boolean scheduled;
     private boolean requested;
     private boolean closed;
@@ -46,6 +52,9 @@ final class TelegramReportWebhook implements AutoCloseable {
         this.catalog = catalog;
         this.api = api;
         this.stores = stores;
+        remindersEnabled = !catalog.reviewers().isEmpty()
+            && catalog.assignments().values().stream().anyMatch(sites -> !sites.isEmpty());
+        worker.setRemoveOnCancelPolicy(true);
         server = HttpServer.create(address, 32);
         server.createContext("/health", this::health);
         server.createContext(UPDATE_PATH, this::receive);
@@ -85,6 +94,7 @@ final class TelegramReportWebhook implements AutoCloseable {
                                        TelegramReportApi api, Stores stores) throws IOException {
         var app = new TelegramReportWebhook(address, secret, catalog, api, stores);
         app.server.start();
+        if (app.remindersEnabled) app.armReminder(Instant.now().getEpochSecond() + REMINDER_RETRY_SECONDS);
         app.wake();
         return app;
     }
@@ -198,9 +208,53 @@ final class TelegramReportWebhook implements AutoCloseable {
                 store.completeWebhookUpdate(pending.id());
                 count++;
             }
+            if (count < BATCH_SIZE && remindersEnabled) checkReminders(bot);
             bot.deliver();
             return count == BATCH_SIZE;
         }
+    }
+
+    private void checkReminders(TelegramReports bot) throws InterruptedException {
+        long now = Instant.now().getEpochSecond();
+        if (now < reminderRetryAt) return;
+        try {
+            long next = bot.nextReminderAt();
+            if (next <= now) {
+                bot.sendDueReminders(now);
+                next = bot.nextReminderAt();
+            }
+            armReminder(next);
+        } catch (InterruptedException stopping) {
+            throw stopping;
+        } catch (TelegramReportApi.ApiFailure failure) {
+            System.err.println("TMS Report: напоминания отложены (Telegram " + failure.status() + ").");
+            postponeReminders(failure.status() == 429
+                ? Math.max(2, failure.retryAfterSeconds()) : REMINDER_RETRY_SECONDS);
+        } catch (Exception failure) {
+            System.err.println("TMS Report: напоминания отложены (" + failure.getClass().getSimpleName() + ").");
+            postponeReminders(REMINDER_RETRY_SECONDS);
+        }
+    }
+
+    private void postponeReminders(int seconds) {
+        reminderRetryAt = Instant.now().getEpochSecond() + seconds;
+        armReminder(reminderRetryAt);
+    }
+
+    private synchronized void armReminder(long at) {
+        if (closed || at == reminderWakeAt) return;
+        if (reminderWake != null) reminderWake.cancel(false);
+        reminderWakeAt = at;
+        reminderWake = at == Long.MAX_VALUE ? null : worker.schedule(this::wakeForReminders,
+            Math.max(1, at - Instant.now().getEpochSecond()), TimeUnit.SECONDS);
+    }
+
+    private synchronized void wakeForReminders() {
+        reminderWake = null;
+        reminderWakeAt = Long.MAX_VALUE;
+        // Preserve a wake if draining fails before the next deadline can be loaded.
+        armReminder(Instant.now().getEpochSecond() + REMINDER_RETRY_SECONDS);
+        wake();
     }
 
     private synchronized void finish(boolean more, boolean failed, int retryAfter) {

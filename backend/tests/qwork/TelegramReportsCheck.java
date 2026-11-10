@@ -9,6 +9,9 @@ import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -83,6 +86,13 @@ final class TelegramReportsCheck {
                 checkDelivery(telegram);
                 checkReview(restarted, telegram, store);
                 checkScopedObjects(restarted, telegram, store);
+                checkDeadlines(restarted, telegram);
+            }
+            try (var store = new TelegramReportStore(database)) {
+                int messages = telegram.messages(ENGINEER).size();
+                new TelegramReports(catalog, store, api).sendDueReminders(Long.MAX_VALUE);
+                check(telegram.messages(ENGINEER).size() == messages,
+                    "Restart repeated an already sent deadline reminder");
             }
         }
         System.out.println("Telegram report workflow passed.");
@@ -276,6 +286,45 @@ final class TelegramReportsCheck {
             && buttons(telegram.lastMessage(UNASSIGNED_ENGINEER)).isEmpty()
             && telegram.lastText(UNASSIGNED_ENGINEER).contains("не назначили объекты"),
             "Engineer without assignments saw objects or started a draft");
+    }
+
+    private static void checkDeadlines(TelegramReports bot, MockTelegram telegram) throws Exception {
+        var dueAt = ZonedDateTime.now(ZoneId.of("Asia/Almaty")).plusHours(1).withSecond(0).withNano(0);
+        String date = dueAt.format(DateTimeFormatter.ofPattern("dd.MM.uuuu HH:mm"));
+        String deadline = "/deadline " + date;
+        int before = telegram.calls.size();
+        bot.handle(message(100, STRANGER, Map.of("text", deadline)));
+        bot.handle(message(101, STRANGER, Map.of("text", "/missing")));
+        check(telegram.calls.size() == before && bot.nextReminderAt() == Long.MAX_VALUE,
+            "An unauthorized user accessed report deadlines");
+
+        bot.handle(message(102, REVIEWER, Map.of("text", deadline)));
+        bot.handle(message(103, REVIEWER, Map.of("text", "/missing")));
+        check(telegram.lastText(REVIEWER).contains("Северный объект")
+            && telegram.lastText(REVIEWER).contains("Южный объект")
+            && bot.nextReminderAt() == dueAt.toEpochSecond(), "A historical report satisfied a new deadline");
+
+        bot.handle(callback(104, SECOND_ENGINEER, "site:south"));
+        bot.handle(message(105, SECOND_ENGINEER, Map.of("video", Map.of("file_id", "new-video"))));
+        bot.handle(message(106, SECOND_ENGINEER, Map.of("text", RESULT)));
+        bot.handle(message(107, SECOND_ENGINEER, Map.of("text", "/send")));
+        bot.handle(message(108, REVIEWER, Map.of("text", deadline)));
+        bot.handle(message(109, REVIEWER, Map.of("text", "/missing")));
+        check(telegram.lastText(REVIEWER).contains("Северный объект")
+            && !telegram.lastText(REVIEWER).contains("Южный объект"),
+            "A submitted report stayed on the missing list after the same deadline was entered again");
+
+        int firstMessages = telegram.messages(ENGINEER).size();
+        int secondMessages = telegram.messages(SECOND_ENGINEER).size();
+        long due = dueAt.toEpochSecond();
+        bot.sendDueReminders(due - 1);
+        check(telegram.messages(ENGINEER).size() == firstMessages, "The bot reminded before the deadline");
+        bot.sendDueReminders(due);
+        bot.sendDueReminders(due + 60);
+        check(telegram.messages(ENGINEER).size() == firstMessages + 1
+            && telegram.lastText(ENGINEER).contains("Северный объект")
+            && telegram.messages(SECOND_ENGINEER).size() == secondMessages
+            && bot.nextReminderAt() == Long.MAX_VALUE, "Reminder was duplicated, missed or sent to the wrong engineer");
     }
 
     private static boolean editTargets(Call edit, Call message) {

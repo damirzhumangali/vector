@@ -19,6 +19,9 @@ final class TelegramReportMigration {
             + " reviewer_id, reviewer_name, decision_at, reason, notice_step", false),
         new Table("telegram_review_prompts", "delivery_id, reviewer_id, message_id", false),
         new Table("telegram_revision_drafts", "engineer_id, source_delivery_id", false),
+        new Table("telegram_report_deadline_commands", "update_id", false),
+        new Table("telegram_report_deadlines", "id, engineer_id, site_id, created_at, due_at, report_cutoff,"
+            + " reminder_attempted_at, reminder_delivered_at, reminder_retry_at", false),
         new Table("telegram_webhook_updates", "queue_id, update_id, payload, completed_at", false)
     );
 
@@ -72,6 +75,7 @@ final class TelegramReportMigration {
                 Db.update(target, "UPDATE telegram_state SET next_offset = ? WHERE id = 1", state.get("next_offset"));
                 for (Table table : TABLES) copyTable(source, target, table);
                 restartIdentity(target, "telegram_reports", "id");
+                restartIdentity(target, "telegram_report_deadlines", "id");
                 restartIdentity(target, "telegram_webhook_updates", "queue_id");
                 long reports = count(target, "telegram_reports");
                 target.commit();

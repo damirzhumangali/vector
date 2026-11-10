@@ -4,11 +4,16 @@ import com.fasterxml.jackson.databind.JsonNode;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.time.Instant;
+import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
+import java.time.format.ResolverStyle;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -17,8 +22,15 @@ final class TelegramReports {
     private static final int MAX_RESULT_LENGTH = 1_500;
     private static final int MAX_REASON_LENGTH = 500;
     private static final int SITE_CHOICES = 8;
+    private static final int DEADLINE_PAGE_SIZE = 10;
     private static final ZoneId ZONE = ZoneId.of("Asia/Almaty");
     private static final DateTimeFormatter DATE = DateTimeFormatter.ofPattern("dd.MM.uuuu HH:mm XXX");
+    private static final DateTimeFormatter DEADLINE_DATE =
+        DateTimeFormatter.ofPattern("dd.MM.uuuu HH:mm").withResolverStyle(ResolverStyle.STRICT);
+    private static final String DEADLINE_HELP = "Чтобы задать срок всем назначенным объектам, отправьте "
+        + "/deadline ДД.ММ.ГГГГ ЧЧ:ММ по времени Казахстана. "
+        + "Для одного сотрудника добавьте его Telegram ID после времени. "
+        + "Для одного объекта добавьте ещё его код. /missing покажет, по каким объектам отчётов пока нет.";
     private static final List<List<Map<String, String>>> MENU = List.of(List.of(button("Добавить отчёт", "new")));
 
     private final TelegramReportCatalog catalog;
@@ -79,6 +91,7 @@ final class TelegramReports {
         while (!Thread.currentThread().isInterrupted()) {
             try {
                 deliver();
+                sendDueReminders(Instant.now().getEpochSecond());
                 var updates = new ArrayList<>(api.updates(store.offset()));
                 if (updates.isEmpty()) {
                     // Telegram has acknowledged the offset and may restart numbering after a week of inactivity.
@@ -132,11 +145,13 @@ final class TelegramReports {
             reply(engineer, "Ваш Telegram ID: " + engineer + ". Его можно передать администратору для доступа.");
             return;
         }
+        if (!callback.isObject() && catalog.reviewers().containsKey(engineer)
+                && handleDeadlineCommand(engineer, text, update.path("update_id").asLong())) return;
         if (!catalog.engineers().containsKey(engineer)) {
             if ("/start".equals(text) || "/help".equals(text)) {
                 if (catalog.reviewers().containsKey(engineer)) {
                     reply(engineer, "Проверяйте отчёты в группе проверки. Нажмите «Принять» или «На доработку». "
-                        + "Для доработки ответьте на сообщение бота с просьбой указать причину.");
+                        + "Для доработки ответьте на сообщение бота с просьбой указать причину.\n\n" + DEADLINE_HELP);
                 } else if ("/start".equals(text)) {
                     reply(engineer, "Попросите администратора добавить вас в список инженеров. Узнать свой ID: /id.");
                 }
@@ -166,7 +181,8 @@ final class TelegramReports {
             case "/help" -> {
                 if (draft == null) api.send(engineer, "TMS Report — отчёты по обслуживанию СКУД. Выберите объект, "
                     + "отправьте видео после работ и опишите результат.\n\n"
-                    + "К незавершённому отчёту можно вернуться командой /start.", MENU);
+                    + "К незавершённому отчёту можно вернуться командой /start."
+                    + (catalog.reviewers().containsKey(engineer) ? "\n\n" + DEADLINE_HELP : ""), MENU);
                 else prompt(draft);
             }
             case "/cancel" -> {
@@ -184,6 +200,145 @@ final class TelegramReports {
                 else accept(draft, message, text);
             }
         }
+    }
+
+    private boolean handleDeadlineCommand(long reviewer, String text, long updateId) throws Exception {
+        if (!text.startsWith("/")) return false;
+        String[] args = text.split("\\s+");
+        switch (args[0]) {
+            case "/deadline" -> setDeadline(reviewer, args, updateId);
+            case "/missing" -> showMissing(reviewer, args);
+            default -> { return false; }
+        }
+        return true;
+    }
+
+    private void setDeadline(long reviewer, String[] args, long updateId) throws Exception {
+        if (args.length < 3 || args.length > 5) {
+            reply(reviewer, DEADLINE_HELP);
+            return;
+        }
+        long now = Instant.now().getEpochSecond();
+        long dueAt;
+        try {
+            dueAt = LocalDateTime.parse(args[1] + " " + args[2], DEADLINE_DATE)
+                .atZone(ZONE).toEpochSecond();
+        } catch (DateTimeParseException invalid) {
+            reply(reviewer, "Проверьте дату и время. Формат — /deadline ДД.ММ.ГГГГ ЧЧ:ММ.");
+            return;
+        }
+        if (dueAt <= now) {
+            reply(reviewer, "Укажите будущий срок по времени Казахстана.");
+            return;
+        }
+        List<Long> engineers = args.length >= 4 ? List.of(positiveId(args[3]))
+            : catalog.engineers().keySet().stream().sorted().toList();
+        var assignments = new ArrayList<TelegramReportStore.DeadlineAssignment>();
+        for (long engineer : engineers) {
+            for (var site : catalog.search(engineer, "")) {
+                if (args.length < 5 || site.id().equals(args[4])) {
+                    assignments.add(new TelegramReportStore.DeadlineAssignment(engineer, site.id()));
+                }
+            }
+        }
+        if (assignments.isEmpty()) {
+            reply(reviewer, "Для выбранных сотрудников и объектов нет назначений. Проверьте Telegram ID и код объекта.");
+            return;
+        }
+        if (store.setDeadlines(updateId, assignments, now, dueAt)) {
+            reply(reviewer, "Срок сдачи — " + formatDeadline(dueAt) + " по времени Казахстана. Назначений: "
+                + assignments.size() + ". Проверить отчёты: /missing.");
+        }
+    }
+
+    private void showMissing(long reviewer, String[] args) throws Exception {
+        long page = args.length == 1 ? 1 : positiveId(args[1]);
+        if (args.length > 2 || page < 1) {
+            reply(reviewer, "Введите /missing или /missing 2 для второй страницы.");
+            return;
+        }
+        var deadlines = store.missingDeadlines().stream().filter(this::isAssigned).toList();
+        if (deadlines.isEmpty()) {
+            reply(reviewer, "Нет ожидаемых отчётов. Задать срок сдачи: /deadline.");
+            return;
+        }
+        int pages = (deadlines.size() - 1) / DEADLINE_PAGE_SIZE + 1;
+        if (page > pages) {
+            reply(reviewer, "Такой страницы нет. Начните с /missing.");
+            return;
+        }
+        int first = ((int) page - 1) * DEADLINE_PAGE_SIZE;
+        long now = Instant.now().getEpochSecond();
+        var result = new StringBuilder("Объекты без отчёта · ").append(deadlines.size()).append('\n');
+        for (var deadline : deadlines.subList(first, Math.min(first + DEADLINE_PAGE_SIZE, deadlines.size()))) {
+            result.append("\n• ").append(catalog.site(deadline.siteId()).label()).append('\n')
+                .append(catalog.engineers().get(deadline.engineerId())).append(" · ")
+                .append(deadline.dueAt() <= now ? "Просрочен с " : "Ожидается до ")
+                .append(formatDeadline(deadline.dueAt())).append('\n');
+        }
+        if (pages > 1) {
+            result.append("\nСтраница ").append(page).append(" из ").append(pages);
+            if (page < pages) result.append(" · Далее /missing ").append(page + 1);
+        }
+        reply(reviewer, result.toString());
+    }
+
+    long nextReminderAt() throws Exception {
+        return store.reminderSchedule().stream()
+            .filter(schedule -> catalog.site(schedule.engineerId(), schedule.siteId()) != null)
+            .mapToLong(TelegramReportStore.ReminderSchedule::checkAt)
+            .min().orElse(Long.MAX_VALUE);
+    }
+
+    void sendDueReminders(long now) throws Exception {
+        var byEngineer = new LinkedHashMap<Long, List<TelegramReportStore.Deadline>>();
+        for (var deadline : store.dueDeadlines(now)) {
+            if (isAssigned(deadline)) {
+                byEngineer.computeIfAbsent(deadline.engineerId(), ignored -> new ArrayList<>()).add(deadline);
+            }
+        }
+        for (var entry : byEngineer.entrySet()) {
+            var deadlines = entry.getValue();
+            for (int first = 0; first < deadlines.size(); first += DEADLINE_PAGE_SIZE) {
+                sendReminder(entry.getKey(), deadlines.subList(first,
+                    Math.min(first + DEADLINE_PAGE_SIZE, deadlines.size())), now);
+            }
+        }
+    }
+
+    private void sendReminder(long engineer, List<TelegramReportStore.Deadline> deadlines, long now) throws Exception {
+        var claimed = new ArrayList<TelegramReportStore.Deadline>();
+        var text = new StringBuilder("Срок сдачи прошёл. Отправьте отчёты по объектам:");
+        for (var deadline : deadlines) {
+            if (store.claimReminder(deadline.id(), now)) {
+                claimed.add(deadline);
+                text.append("\n• ").append(catalog.site(deadline.siteId()).label())
+                    .append(" · срок ").append(formatDeadline(deadline.dueAt()));
+            }
+        }
+        if (claimed.isEmpty()) return;
+        try {
+            api.send(engineer, text.toString(), MENU);
+        } catch (TelegramReportApi.ApiFailure error) {
+            if (error.status() == 429) {
+                long retryAt = Instant.now().getEpochSecond() + Math.max(2, error.retryAfterSeconds());
+                for (var deadline : claimed) store.releaseReminder(deadline.id(), now, retryAt);
+                throw error;
+            }
+            if (!rejected(error)) throw error;
+            System.err.println("TMS Report: Telegram отклонил напоминание о сроке отчёта.");
+            return;
+        }
+        long deliveredAt = Instant.now().getEpochSecond();
+        for (var deadline : claimed) store.markReminderDelivered(deadline.id(), deliveredAt);
+    }
+
+    private boolean isAssigned(TelegramReportStore.Deadline deadline) {
+        return catalog.site(deadline.engineerId(), deadline.siteId()) != null;
+    }
+
+    private static String formatDeadline(long time) {
+        return DEADLINE_DATE.format(Instant.ofEpochSecond(time).atZone(ZONE));
     }
 
     private void handleReview(long reviewerId, JsonNode callback, JsonNode message) throws Exception {

@@ -159,7 +159,9 @@ final class TelegramReports {
 
         switch (text) {
             case "/start", "/help" -> {
-                if (draft == null) api.send(engineer, "TMS Report — отчёты по обслуживанию СКУД. Выберите объект, пришлите видео до и после работ и опишите результат.", MENU);
+                if (draft == null) api.send(engineer, "TMS Report — отчёты по обслуживанию СКУД. Выберите объект, "
+                    + "отправьте два видео отдельными сообщениями и опишите результат.\n\n"
+                    + "К незавершённому отчёту можно вернуться командой /start.", MENU);
                 else prompt(draft);
             }
             case "/new" -> start(engineer, draft);
@@ -272,16 +274,18 @@ final class TelegramReports {
     }
 
     private void showSites(long engineer, String query) throws Exception {
+        String heading = "1 из 5 · Выберите объект";
         var sites = catalog.search(query);
         if (sites.isEmpty()) {
-            reply(engineer, "Объект не найден. Введите часть названия или региона. Команда /sites покажет список снова.");
+            reply(engineer, heading + "\nОбъект не найден. Введите часть названия или региона. "
+                + "Команда /sites покажет весь список.");
             return;
         }
         List<List<Map<String, String>>> keys = sites.stream().limit(SITE_CHOICES)
             .map(site -> List.of(button(site.label(), "site:" + site.id()))).toList();
         api.send(engineer, sites.size() > SITE_CHOICES
-            ? "Выберите объект или введите часть названия или региона, чтобы сузить список."
-            : "Выберите объект.", keys);
+            ? heading + "\nВведите часть названия или региона, чтобы сузить список."
+            : heading, keys);
     }
 
     private void choose(long engineer, TelegramReportStore.Draft draft, String siteId) throws Exception {
@@ -291,16 +295,28 @@ final class TelegramReports {
             showSites(engineer, "");
             return;
         }
-        store.save(new TelegramReportStore.Draft(engineer, site.id(), null, null, null, List.of()));
-        reply(engineer, "Объект: " + site.label() + "\nПришлите видео ДО работ. Покажите состояние турникета, терминала или программы, которые будете обслуживать.");
+        var selected = new TelegramReportStore.Draft(engineer, site.id(), null, null, null, List.of());
+        store.save(selected);
+        prompt(selected);
     }
 
     private void prompt(TelegramReportStore.Draft draft) throws Exception {
         if (draft.siteId() == null) showSites(draft.engineerId(), "");
-        else if (draft.before() == null) reply(draft.engineerId(), "Пришлите видео ДО работ.");
-        else if (draft.after() == null) reply(draft.engineerId(), "Пришлите видео ПОСЛЕ работ. Покажите, как система работает после обслуживания.");
-        else if (draft.result() == null) reply(draft.engineerId(), "Опишите текстом, что сделали и что проверили после работ.");
+        else if (draft.before() == null || draft.after() == null) promptVideo(draft, "");
+        else if (draft.result() == null) reply(draft.engineerId(), "4 из 5 · Опишите результат\n"
+            + "Оба видео получены. Напишите, что сделали и что проверили после работ.\n\n"
+            + "Например: «Заменили считыватель. Проверили проход по карте».");
         else preview(draft);
+    }
+
+    private void promptVideo(TelegramReportStore.Draft draft, String feedback) throws Exception {
+        if (draft.before() == null) {
+            reply(draft.engineerId(), "2 из 5 · Видео до работ\nОбъект: " + siteLabel(draft.siteId()) + "\n"
+                + feedback + "Пришлите видео ДО работ одним сообщением. Покажите состояние оборудования.");
+        } else {
+            reply(draft.engineerId(), "3 из 5 · Видео после работ\nВидео «до» получено.\n" + feedback
+                + "Пришлите видео ПОСЛЕ работ отдельным сообщением. Покажите, как работает система после обслуживания.");
+        }
     }
 
     private void accept(TelegramReportStore.Draft draft, JsonNode message, String text) throws Exception {
@@ -315,15 +331,17 @@ final class TelegramReports {
 
         if (draft.before() == null || draft.after() == null) {
             if (message.hasNonNull("media_group_id")) {
-                reply(engineer, "Пришлите видео до и после отдельными сообщениями, чтобы бот их правильно подписал.");
+                promptVideo(draft, "Видео из альбома не принято. Отправляйте ролики по одному.\n");
                 return;
             }
-            if (message.path("video").isObject() || message.path("document").path("mime_type").asText().startsWith("video/")) {
-                var before = draft.before() == null ? Long.valueOf(messageId) : draft.before();
-                var after = draft.before() == null ? null : Long.valueOf(messageId);
-                draft = new TelegramReportStore.Draft(engineer, draft.siteId(), before, after, null, List.of());
-                store.save(draft);
+            if (!message.path("video").isObject() && !message.path("document").path("mime_type").asText().startsWith("video/")) {
+                promptVideo(draft, "На этом шаге нужен видеоролик.\n");
+                return;
             }
+            var before = draft.before() == null ? Long.valueOf(messageId) : draft.before();
+            var after = draft.before() == null ? null : Long.valueOf(messageId);
+            draft = new TelegramReportStore.Draft(engineer, draft.siteId(), before, after, null, List.of());
+            store.save(draft);
         } else if (draft.result() == null) {
             if (text.length() > MAX_RESULT_LENGTH) {
                 reply(engineer, "Сократите результат до " + MAX_RESULT_LENGTH + " символов.");
@@ -347,8 +365,10 @@ final class TelegramReports {
     }
 
     private void preview(TelegramReportStore.Draft draft) throws Exception {
-        api.send(draft.engineerId(), summary(draft) + "\n\nВидео до и после получены. Дополнительных вложений: "
-            + draft.documents().size() + ". Можно добавить фото или документы. Когда всё готово, отправьте отчёт.",
+        api.send(draft.engineerId(), "5 из 5 · Проверьте отчёт\n\n" + summary(draft)
+            + "\n\n✓ Видео до работ\n✓ Видео после работ\nДополнительных вложений: "
+            + draft.documents().size() + " из " + MAX_DOCUMENTS
+            + "\n\nМожно добавить фото или документы. Кнопка «Отправить отчёт» передаст материалы в чат проверки.",
             List.of(List.of(button("Отправить отчёт", sendAction(draft)))));
     }
 
@@ -358,10 +378,14 @@ final class TelegramReports {
     }
 
     private String summary(TelegramReportStore.Draft draft) {
-        var site = catalog.site(draft.siteId());
-        return "Объект: " + (site == null ? draft.siteId() : site.label())
+        return "Объект: " + siteLabel(draft.siteId())
             + "\nИнженер: " + catalog.engineers().get(draft.engineerId())
             + "\n\nРезультат: " + draft.result();
+    }
+
+    private String siteLabel(String siteId) {
+        var site = catalog.site(siteId);
+        return site == null ? siteId : site.label();
     }
 
     private void submit(long engineer, TelegramReportStore.Draft draft, long updateId) throws Exception {

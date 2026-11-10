@@ -25,7 +25,7 @@ final class TelegramReportsCheck {
     private static final long OTHER_REVIEWER = 4_100_000_004L;
     private static final long REVIEW_CHAT = -1_004_000_000_001L;
     private static final long WRONG_CHAT = -1_004_000_000_002L;
-    private static final long BEFORE = 16;
+    private static final long BEFORE = 15;
     private static final long AFTER = 17;
     private static final long DOCUMENT = 19;
     private static final String RESULT = "Проверили проход, заменили считыватель <СКУД>.";
@@ -99,25 +99,36 @@ final class TelegramReportsCheck {
         bot.handle(message(7, ENGINEER, Map.of("text", "астана")));
         check("site:north".equals(telegram.lastButton(ENGINEER)), "Region search did not offer the configured object");
         bot.handle(callback(8, ENGINEER, "site:north"));
+        check(telegram.lastText(ENGINEER).contains("2 из 5")
+            && telegram.lastText(ENGINEER).contains("Северный объект"), "Video prompt omitted the selected object");
 
         bot.handle(message(9, ENGINEER, Map.of("photo", List.of(Map.of("file_id", "photo")))));
-        check(store.draft(ENGINEER).before() == null && telegram.lastText(ENGINEER).contains("видео ДО"),
-            "A photo was accepted as the first video");
+        check(store.draft(ENGINEER).before() == null && telegram.lastText(ENGINEER).contains("нужен видеоролик")
+            && telegram.lastText(ENGINEER).contains("видео ДО"), "A photo did not get a step-specific correction");
         bot.handle(message(10, ENGINEER, Map.of("text", "/send")));
         check(store.pending() == null && telegram.reviewCalls().isEmpty(), "An incomplete report reached the review chat");
+        bot.handle(message(11, ENGINEER, Map.of("video", Map.of("file_id", "album-video"), "media_group_id", "album")));
+        check(store.draft(ENGINEER).before() == null && telegram.lastText(ENGINEER).contains("ролики по одному"),
+            "An album video was accepted or did not get upload instructions");
 
         var before = message(BEFORE, ENGINEER, Map.of("video", Map.of("file_id", "before")));
         bot.handle(before);
         bot.handle(before);
         check(store.draft(ENGINEER).after() == null && telegram.lastText(ENGINEER).contains("видео ПОСЛЕ"),
             "The same video was accepted twice");
+        bot.handle(message(16, ENGINEER, Map.of("text", "/start")));
+        check(telegram.lastText(ENGINEER).contains("Видео «до» получено")
+            && telegram.lastText(ENGINEER).contains("видео ПОСЛЕ"), "Resuming the draft did not show the saved first video");
         bot.handle(message(AFTER, ENGINEER, Map.of("document", Map.of("file_id", "after", "mime_type", "video/mp4"))));
+        check(telegram.lastText(ENGINEER).contains("Оба видео получены"), "The second video was not acknowledged");
         bot.handle(message(18, ENGINEER, Map.of("text", RESULT)));
         bot.handle(message(DOCUMENT, ENGINEER, Map.of("document", Map.of("file_id", "act", "mime_type", "application/pdf"))));
 
         String sendAction = telegram.lastButton(ENGINEER);
-        check(sendAction.startsWith("send:") && telegram.lastText(ENGINEER).contains(RESULT),
-            "Complete draft did not show result and a submission button");
+        String preview = telegram.lastText(ENGINEER);
+        check(sendAction.startsWith("send:") && preview.contains(RESULT) && preview.contains("✓ Видео до работ")
+            && preview.contains("✓ Видео после работ") && preview.contains("вложений: 1 из 5"),
+            "Complete draft did not show its saved videos, attachment count, result and submission button");
         var submit = callback(20, ENGINEER, sendAction);
         bot.handle(submit);
         check(telegram.lastText(ENGINEER).contains("принят к отправке"), "No receipt for the accepted report");
